@@ -1,0 +1,34 @@
+# Build output
+.output
+.data
+.nuxt
+.nitro
+.cache
+dist
+node_modules
+
+# Logs
+logs
+*.log
+
+# Local env files — hold the Shopify secret and, later, the reading key
+.env
+.env.*
+!.env.example
+
+# The database, and the supplier pictures kept beside it. On the server they
+# live in the mounted volume; they never belong in git.
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+server/db/size-chart-images/
+
+# The listing team's product sheets: product data and supplier links
+Size chart*.xlsx
+Size chart*.pdf
+
+# Editors
+.DS_Store
+.idea
+.vscode

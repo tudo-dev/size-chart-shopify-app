@@ -1,0 +1,26 @@
+services:
+  sizecharts:
+    container_name: tudoholic-size-charts
+    build: .
+    restart: always
+    # Only the server itself may reach it; the web server in front hands it
+    # the traffic for sizecharts.tudoholic.com. Logistics uses 3002.
+    ports:
+      - "127.0.0.1:3003:3000"
+    env_file:
+      - .env
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "3000"
+      # Its own database, in its own folder — never Logistics'.
+      DATABASE_URL: "/app/data/db.sqlite"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    healthcheck:
+      # 127.0.0.1, not localhost: inside the container localhost tries IPv6
+      # first and the app listens on IPv4 only (found on Logistics, 2026-09-02).
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
