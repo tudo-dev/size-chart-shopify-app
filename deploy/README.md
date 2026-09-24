@@ -25,10 +25,15 @@ In `.env`, fill in:
 - `SHOPIFY_APP_URL=https://sizecharts.tudoholic.com` (already filled)
 - `ALLOWED_SHOPS=tudoholic-com.myshopify.com` (already filled). Left empty,
   nobody can log in.
-- `ANTHROPIC_API_KEY`: the key for reading the pictures. It can be added
-  later; until then, pictures wait to be read.
 
-Then:
+The picture-reading key is already on the server, inside Logistics. This copies
+it across without showing it:
+
+```
+sed -i '/^ANTHROPIC_API_KEY=/d' .env && grep '^ANTHROPIC_API_KEY=' /srv/apps/tudoholic-logistics-app/.env >> .env && grep -c '^ANTHROPIC_API_KEY=.' .env
+```
+
+It prints `1`. Then:
 
 ```
 cp deploy/deploy_sizecharts ~/ && chmod +x ~/deploy_sizecharts
@@ -37,7 +42,31 @@ cp deploy/deploy_sizecharts ~/ && chmod +x ~/deploy_sizecharts
 
 It ends with "Deployment finished - the app answers on 127.0.0.1:3004".
 
-## 3. The web server and certificate (server, admin with sudo)
+## 3. Bring the charts over from Logistics (server, as `deploy`)
+
+This copies the charts already read inside Logistics, their sheet uploads, the
+product map, the two switches and the supplier pictures. Logistics is only
+read. Do it now, before anyone opens the app on the store.
+
+```
+cd /srv/apps/size-chart-shopify-app
+docker compose stop
+docker compose run --rm --no-deps --entrypoint node -v /srv/apps/tudoholic-logistics-app/server/db:/logistics:ro -v "$PWD/scripts:/app/scripts:ro" sizecharts scripts/copy-from-logistics.mjs /logistics/db.sqlite
+```
+
+That only looks, and says what it would copy. **If it says the pictures are
+missing for most charts, stop here**: it is reading the wrong folder. If it
+looks right, run the same `docker compose run …` line again with ` --apply` on
+the end. It ends with "Done. Every table matches Logistics". Then:
+
+```
+docker compose up -d
+```
+
+Run it a second time and it refuses, so nothing can be doubled. Size charts
+comes out of Logistics only after the charts show in this app (step 6).
+
+## 4. The web server and certificate (server, admin with sudo)
 
 ```
 sudo cp /srv/apps/size-chart-shopify-app/deploy/nginx/sizecharts.tudoholic.com.conf /etc/nginx/sites-enabled/
@@ -61,7 +90,7 @@ asking for the same address. Since the login lock (2026-09-23), those answers
 belong to whoever was logged in. With these two lines, nothing that carried a
 login is ever kept.
 
-## 4. Shopify (laptop, in the size-chart-shopify-app folder)
+## 5. Shopify (laptop, in the size-chart-shopify-app folder)
 
 ```
 shopify app deploy
@@ -74,11 +103,11 @@ Then, in the Shopify dev dashboard: **Tudoholic Size Charts → Distribution →
 Custom distribution**, store `tudoholic-com.myshopify.com`. Open the install
 link while logged in to the live store, and install.
 
-## 5. The first check
+## 6. The first check
 
-Open the app in the live store. Tick one switch on the page and untick it
-again: that makes the app get its own Shopify key for the store. Then, on the
-server:
+Open the app in the live store. The charts from Logistics are there. Tick one
+switch on the page and untick it again: that makes the app get its own Shopify
+key for the store. Then, on the server:
 
 ```
 docker logs tudoholic-size-charts --tail 30
