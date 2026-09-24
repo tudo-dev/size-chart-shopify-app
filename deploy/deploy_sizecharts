@@ -1,0 +1,35 @@
+#!/bin/bash
+# Deploys Tudoholic Size Charts on the server, the same way ~/deploy_logistics
+# deploys Logistics. Copy it to the deploy user's home once:
+#   cp /srv/apps/size-chart-shopify-app/deploy/deploy_sizecharts ~/ && chmod +x ~/deploy_sizecharts
+# then run ~/deploy_sizecharts after every push to main.
+set -e
+
+APP_DIR="/srv/apps/size-chart-shopify-app"
+cd "$APP_DIR"
+
+if [ ! -f .env ]; then
+  echo "No .env in $APP_DIR - create it first (see .env.example). Nothing was changed."
+  exit 1
+fi
+
+echo "Pulling latest code from Git..."
+git config pull.rebase false
+git pull origin main
+
+echo "Building new Docker image..."
+docker compose build
+
+echo "Restarting the container..."
+docker compose up -d
+
+echo "Checking that the app answers..."
+for attempt in $(seq 1 30); do
+  if curl -fsS http://127.0.0.1:3004/api/health > /dev/null; then
+    echo "Deployment finished - the app answers on 127.0.0.1:3004."
+    exit 0
+  fi
+  sleep 2
+done
+echo "The app did not answer within a minute. See: docker compose logs --tail 50"
+exit 1
