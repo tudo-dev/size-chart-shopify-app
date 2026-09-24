@@ -12,7 +12,8 @@
     "lint:fix": "eslint --fix .",
     "db:generate": "drizzle-kit generate",
     "verify": "tsx scripts/verify-skeleton.ts && tsx scripts/verify-size-charts.ts",
-    "verify:size-charts": "tsx scripts/verify-size-charts.ts"
+    "verify:size-charts": "tsx scripts/verify-size-charts.ts",
+    "login:live": "node scripts/verify-login-live.mjs"
   },
   "dependencies": {
     "@nuxt/eslint": "1.5.1",

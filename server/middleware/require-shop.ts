@@ -12,6 +12,8 @@
  */
 import { getRequestURL } from 'h3'
 import { isOpenPath } from '../utils/open-paths'
+import { shopifyCredentials } from '../utils/scopes'
+import { shopAllowed } from '../utils/allowed-shops'
 
 export default defineEventHandler(async (event) => {
   const path = getRequestURL(event).pathname
@@ -21,7 +23,18 @@ export default defineEventHandler(async (event) => {
   try {
     event.context.shop = await verifiedShop(sessionToken)
   }
-  catch {
+  catch (error) {
+    // Why, so a refusal can be told apart from a wrong key or a missing
+    // secret — never the token itself, which the Shopify library puts inside
+    // its own error message.
+    const reason = error instanceof Error ? error.message.replace(/'[^']*'/g, '\'…\'') : String(error)
+    const { apiKey, apiSecretKey } = shopifyCredentials()
+    console.warn(`[login] refused ${path}: ${reason} (key set: ${apiKey ? 'yes' : 'no'}, secret set: ${apiSecretKey ? 'yes' : 'no'})`)
     throw createError({ statusCode: 401, statusMessage: 'Your Shopify session could not be verified. Reload the app.' })
+  }
+  // A real login from a store this app is not set up for (server/utils/allowed-shops.ts).
+  if (!shopAllowed(event.context.shop, process.env.ALLOWED_SHOPS, import.meta.dev)) {
+    console.warn(`[login] refused ${path}: ${event.context.shop} is not in ALLOWED_SHOPS${process.env.ALLOWED_SHOPS ? '' : ' (ALLOWED_SHOPS is not set on this server)'}`)
+    throw createError({ statusCode: 403, statusMessage: 'This app is not set up for this store.' })
   }
 })

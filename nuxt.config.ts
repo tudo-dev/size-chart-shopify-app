@@ -41,6 +41,27 @@ export default defineNuxtConfig({
   },
   compatibilityDate: '2025-05-15',
 
+  nitro: {
+    // The Shopify library needs its Node adapter loaded before first use
+    // (`import '@shopify/shopify-api/adapters/node'` in server/utils/shopify.ts).
+    // Nitro drops every import that binds nothing unless it is listed here, so
+    // without this the build had NO adapter and every login failed with
+    // "Missing adapter implementation" (found on 2026-09-24, in `shopify app
+    // dev`). server/plugins/shopify-adapter.ts loads it at start-up as well,
+    // the way Tudoholic Logistics has done since 2025.
+    moduleSideEffects: ['@shopify/shopify-api/adapters/node'],
+  },
+
+  vite: {
+    server: {
+      // `shopify app dev` serves a laptop through a trycloudflare.com tunnel,
+      // and Vite's dev server refuses any host it was not told about
+      // ("Blocked request. This host … is not allowed", 2026-09-24). Only the
+      // laptop's dev server reads this; the built app has no Vite server.
+      allowedHosts: ['.trycloudflare.com'],
+    },
+  },
+
   eslint: {
     config: {
       stylistic: true,
@@ -60,6 +81,16 @@ export default defineNuxtConfig({
       },
       crossOriginEmbedderPolicy: false,
     },
+    // Off: nuxt-security's default allows 150 requests per 5 minutes per
+    // address for the whole app, and the review page's own progress polling
+    // used that up about 3 minutes into a picture-reading job — then every
+    // page and webhook from that address got 429 (reproduced 2026-09-24).
+    // Every /api route already needs a verified Shopify login.
+    rateLimiter: false,
+    // Off: it refused any review note or search with < or > ("M -> L",
+    // "length < 70") with a bare 400. Vue escapes everything it shows and the
+    // server renders no HTML.
+    xssValidator: false,
     // Shopify posts webhooks with bodies the default size limit might refuse.
     requestSizeLimiter: {
       maxRequestSizeInBytes: 2_000_000,

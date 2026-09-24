@@ -174,12 +174,43 @@ check('  read at the moment of use', shopifyCredentials(), { apiKey: 'k', apiSec
 check('a session token that fails verification is refused with 401, never a 500', /catch \{\s*throw createError\(\{ statusCode: 401/.test(read('server/utils/shopify.ts')), true)
 // 2026-09-23: three size chart routes moved from Logistics answered with no
 // login at all; production gave anyone 100 charts and 1688 supplier links.
+// 2026-09-24: Nitro drops an import that binds nothing unless it is listed as
+// having side effects, so the build shipped WITHOUT the Shopify Node adapter
+// and every login failed ("Missing adapter implementation"). Only a real login
+// showed it; scripts/verify-login-live.mjs does that against the build.
+check('the Shopify Node adapter is kept in the build (nitro.moduleSideEffects)',
+  /moduleSideEffects: \[[^\]]*'@shopify\/shopify-api\/adapters\/node'/.test(read('nuxt.config.ts')), true)
+check('  and loaded again at start-up, the way Logistics does',
+  /defineNitroPlugin\(async \(\) => \{\s*await import\('@shopify\/shopify-api\/adapters\/node'\)/.test(read('server/plugins/shopify-adapter.ts')), true)
+check('  and the login code still imports it first', read('server/utils/shopify.ts').startsWith('import \'@shopify/shopify-api/adapters/node\''), true)
 const guard = read('server/middleware/require-shop.ts')
+check('a refused login is logged with its reason, the token masked out', guard.includes(String.raw`error.message.replace(/'[^']*'/g, '\'…\'')`) && guard.includes('console.warn(`[login] refused ${path}: ${reason}'), true)
 check('one guard stands in front of every /api route', /path\.startsWith\('\/api\/'\)/.test(guard) && /statusCode: 401/.test(guard) && /isOpenPath\(path\)/.test(guard), true)
 const { isOpenPath } = await import('../server/utils/open-paths')
 check('  only the health check and Shopify\'s signed webhooks pass without a login',
   ['/api/health', '/api/webhooks/compliance', '/api/webhooks/app-uninstalled', '/api/size-charts/list', '/api/size-charts/summary', '/api/size-charts/1', '/api/shop', '/api/healthz', '/api/webhooksx', '/api/health/../size-charts/list'].map(isOpenPath),
   [true, true, true, false, false, false, false, false, false, false])
+// 2026-09-24: once live, the logx test store (where `shopify app dev` put the
+// app) would open the live app with a valid login, and the tables have no
+// store column — a Sync there would replace the live store's product map.
+const { shopAllowed } = await import('../server/utils/allowed-shops')
+check('only the stores in ALLOWED_SHOPS get in; unset on the server means nobody, on a laptop anybody',
+  [
+    shopAllowed('tudoholic-com.myshopify.com', 'tudoholic-com.myshopify.com', false),
+    shopAllowed('Tudoholic-com.myshopify.com ', ' tudoholic-com.myshopify.com, other.myshopify.com', false),
+    shopAllowed('logx-ivsveium.myshopify.com', 'tudoholic-com.myshopify.com', false),
+    shopAllowed('logx-ivsveium.myshopify.com', 'tudoholic-com.myshopify.com', true),
+    shopAllowed('tudoholic-com.myshopify.com', '', false),
+    shopAllowed('tudoholic-com.myshopify.com', undefined, false),
+    shopAllowed('logx-ivsveium.myshopify.com', undefined, true),
+  ],
+  [true, true, false, false, false, false, true])
+check('  the guard asks after the login is verified, and answers 403',
+  guard.indexOf('shopAllowed(event.context.shop, process.env.ALLOWED_SHOPS, import.meta.dev)') > guard.indexOf('await verifiedShop(sessionToken)') && /statusCode: 403/.test(guard), true)
+check('  .env.example names it, filled with the live store', /^ALLOWED_SHOPS=tudoholic-com\.myshopify\.com$/m.test(read('.env.example')), true)
+const securityConfig = read('nuxt.config.ts')
+check('nuxt-security\'s rate limiter is off (the review page\'s polling used up 150 per 5 minutes and locked staff out)', /rateLimiter: false/.test(securityConfig), true)
+check('  and so is its XSS filter (it refused notes like "M -> L" with a bare 400)', /xssValidator: false/.test(securityConfig), true)
 const compose = read('docker-compose.yml')
 // 2026-09-23: 3003 was first chosen here, but chinaops.tudoholic.com already
 // has it on the server (its web-server config) — the container could never start.
