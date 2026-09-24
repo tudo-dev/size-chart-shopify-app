@@ -1,0 +1,6 @@
+data
+.env
+.env.*
+deploy
+pixel
+*.md

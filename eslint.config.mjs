@@ -2,5 +2,6 @@
 import withNuxt from './.nuxt/eslint.config.mjs'
 
 export default withNuxt({
-  ignores: ['server/db/migrations/**'],
+  // ranking/ is a separate Go feature (ranking/README.md), not part of this app.
+  ignores: ['server/db/migrations/**', 'ranking/**'],
 })

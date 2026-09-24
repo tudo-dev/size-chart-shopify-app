@@ -11,3 +11,5 @@ logs
 *.sqlite-*
 server/db/size-chart-images
 Size chart*
+# Tudoholic Ranking is a separate feature with its own image (ranking/README.md)
+ranking

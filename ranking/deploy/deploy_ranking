@@ -1,0 +1,36 @@
+#!/bin/bash
+# Deploys Tudoholic Ranking on the server. Copy it to the deploy user's home once:
+#   cp /srv/apps/size-chart-shopify-app/ranking/deploy/deploy_ranking ~/ && chmod +x ~/deploy_ranking
+# then run ~/deploy_ranking after every push to main that changed ranking/.
+# It pulls the shared repo but builds and restarts ONLY the ranking container;
+# Size Charts keeps running on whatever it was last deployed with.
+set -e
+
+DIR="/srv/apps/size-chart-shopify-app/ranking"
+cd "$DIR"
+
+if [ ! -f .env ]; then
+  echo "No .env in $DIR - create it first (see .env.example). Nothing was changed."
+  exit 1
+fi
+mkdir -p data
+
+echo "Pulling latest code from Git..."
+git -C .. config pull.rebase false
+git -C .. pull origin main
+
+echo "Building (runs the tests first)..."
+docker compose build
+
+echo "Restarting the ranking container..."
+docker compose up -d
+
+for attempt in $(seq 1 15); do
+  if curl -fsS http://127.0.0.1:3005/health > /dev/null; then
+    echo "Deployment finished - ranking answers on 127.0.0.1:3005."
+    exit 0
+  fi
+  sleep 2
+done
+echo "Ranking did not answer within 30 seconds. See: docker compose logs --tail 50"
+exit 1

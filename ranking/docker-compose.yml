@@ -1,0 +1,27 @@
+# Tudoholic Ranking. Its own compose project, container, port and data
+# folder: starting, stopping or rebuilding it never touches Size Charts, and
+# the other way round.
+name: tudoholic-ranking
+services:
+  ranking:
+    container_name: tudoholic-ranking
+    build: .
+    restart: always
+    # 3001 delivery, 3002 Logistics, 3003 chinaops, 3004 Size Charts.
+    ports:
+      - "127.0.0.1:3005:8080"
+    env_file:
+      - .env
+    environment:
+      ADDR: ":8080"
+      DATA_DIR: "/data"
+    volumes:
+      - ./data:/data
+    read_only: true
+    mem_limit: 64m
+    cpus: 0.5
+    healthcheck:
+      test: ["CMD", "/ranking", "health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
