@@ -134,3 +134,29 @@ export async function getClient(event: H3Event): Promise<{ client: GraphqlClient
   client.request = send as GraphqlClient['request']
   return { client, shop }
 }
+
+/*
+ * The two names the size chart routes were written against in Logistics,
+ * kept so those routes moved across unchanged. Same meaning as there.
+ */
+
+/** The shop making this request, verified, or null. */
+export const getVerifiedShopUrl = getVerifiedShop
+
+/**
+ * The verified shop and its offline access token, for a route that hands a
+ * client to a background job. The token is also saved in the database here,
+ * so the job and every later one can reach the store with no page open.
+ */
+export async function getAccessToken(event: H3Event): Promise<{ session: Pick<Session, 'shop' | 'accessToken'> }> {
+  const sessionToken = getSessionTokenFromHeaders(event)
+  if (!sessionToken) throw createError({ statusCode: 401, statusMessage: 'Open the app from Shopify admin.' })
+  let shop: string
+  try {
+    shop = await verifiedShop(sessionToken)
+  }
+  catch {
+    throw createError({ statusCode: 401, statusMessage: 'Your Shopify session could not be verified. Reload the app.' })
+  }
+  return { session: { shop, accessToken: await accessTokenFor(shop, sessionToken) } }
+}

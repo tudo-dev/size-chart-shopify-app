@@ -10,3 +10,8 @@ export function fromColumnText(text: string | null | undefined): Date | null {
   const date = new Date(`${text.replace(' ', 'T')}Z`)
   return Number.isNaN(date.getTime()) ? null : date
 }
+
+/** Now, as a column: the name the size chart code was written against in Logistics. */
+export function nowColumnText(nowMs: number = Date.now()): string {
+  return columnText(nowMs)
+}

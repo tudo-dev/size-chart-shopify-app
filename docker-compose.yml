@@ -4,9 +4,11 @@ services:
     build: .
     restart: always
     # Only the server itself may reach it; the web server in front hands it
-    # the traffic for sizecharts.tudoholic.com. Logistics uses 3002.
+    # the traffic for sizecharts.tudoholic.com. The server's other sites
+    # already hold 3001 (delivery), 3002 (Logistics) and 3003 (chinaops) —
+    # read from its web-server config, 2026-09-23.
     ports:
-      - "127.0.0.1:3003:3000"
+      - "127.0.0.1:3004:3000"
     env_file:
       - .env
     environment:

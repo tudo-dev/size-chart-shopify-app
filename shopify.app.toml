@@ -1,0 +1,32 @@
+# Tudoholic Size Charts — https://shopify.dev/docs/apps/tools/cli/configuration
+# The client_id is public by design; the secret is never in this file.
+
+client_id = "0f8e54d5b874a56aeda52d19d0a5006a"
+name = "Tudoholic Size Charts"
+handle = "tudoholic-size-charts"
+application_url = "https://sizecharts.tudoholic.com/"
+embedded = true
+
+[build]
+include_config_on_deploy = true
+automatically_update_urls_on_dev = true
+
+[access_scopes]
+# Products and files only — see server/utils/scopes.ts. `pnpm verify` fails
+# if this list and that one ever disagree.
+scopes = "read_products,write_products,read_files,write_files"
+
+[auth]
+redirect_urls = [ "https://sizecharts.tudoholic.com/api/auth" ]
+
+[webhooks]
+# The same API version the server code speaks (API_VERSION in server/utils/shopify.ts).
+api_version = "2026-07"
+
+  [[webhooks.subscriptions]]
+  topics = [ "app/uninstalled" ]
+  uri = "https://sizecharts.tudoholic.com/api/webhooks/app-uninstalled"
+
+  [[webhooks.subscriptions]]
+  compliance_topics = [ "customers/data_request", "customers/redact", "shop/redact" ]
+  uri = "https://sizecharts.tudoholic.com/api/webhooks/compliance"

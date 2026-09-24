@@ -138,14 +138,17 @@ section('The app asks for products and files, and nothing else')
 
 check('exactly four permissions', [...APP_SCOPES], ['read_products', 'write_products', 'read_files', 'write_files'])
 check('no orders, no customers', APP_SCOPES.some(scope => /order|customer/.test(scope)), false)
-if (existsSync(join(repo, 'shopify.app.toml'))) {
-  const toml = read('shopify.app.toml')
-  const declared = /scopes\s*=\s*"([^"]*)"/.exec(toml)?.[1]?.split(',').map(scope => scope.trim()).filter(Boolean).sort()
-  check('shopify.app.toml asks for exactly the same', declared, [...APP_SCOPES].sort())
-}
-else {
-  console.log('NOTE  shopify.app.toml is not there yet — it is written when the app is linked to Shopify')
-}
+// Linked to Shopify on 2026-09-23 as "Tudoholic Size Charts" in the tudoholic
+// organisation — the same one Tudoholic Logistics is in.
+check('shopify.app.toml exists', existsSync(join(repo, 'shopify.app.toml')), true)
+const toml = existsSync(join(repo, 'shopify.app.toml')) ? read('shopify.app.toml') : ''
+const declared = /scopes\s*=\s*"([^"]*)"/.exec(toml)?.[1]?.split(',').map(scope => scope.trim()).filter(Boolean).sort()
+check('shopify.app.toml asks for exactly the same', declared, [...APP_SCOPES].sort())
+check('  and it is this app, not Tudoholic Logistics', [/client_id = "0f8e54d5b874a56aeda52d19d0a5006a"/.test(toml), /8e854da19c6e8be806613b57d639b4ed/.test(toml)], [true, false])
+check('  its webhooks speak the same API version as the server code', /api_version = "2026-07"/.test(toml) && /ApiVersion\.July26/.test(read('server/utils/shopify.ts')), true)
+check('  every webhook it names exists', ['/api/webhooks/app-uninstalled', '/api/webhooks/compliance'].map(path => toml.includes(`https://sizecharts.tudoholic.com${path}"`) && existsSync(join(repo, `server${path}.post.ts`))), [true, true])
+check('  all three privacy topics are answered', /compliance_topics = \[ "customers\/data_request", "customers\/redact", "shop\/redact" \]/.test(toml), true)
+check('  no secret is in it', /secret/i.test(toml.replace(/the secret is never in this file/, '')), false)
 
 // ---------------------------------------------------------------------------
 section('Where things are wired')
@@ -169,8 +172,20 @@ process.env.SHOPIFY_API_SECRET = 's'
 const { shopifyCredentials } = await import('../server/utils/scopes')
 check('  read at the moment of use', shopifyCredentials(), { apiKey: 'k', apiSecretKey: 's' })
 check('a session token that fails verification is refused with 401, never a 500', /catch \{\s*throw createError\(\{ statusCode: 401/.test(read('server/utils/shopify.ts')), true)
+// 2026-09-23: three size chart routes moved from Logistics answered with no
+// login at all; production gave anyone 100 charts and 1688 supplier links.
+const guard = read('server/middleware/require-shop.ts')
+check('one guard stands in front of every /api route', /path\.startsWith\('\/api\/'\)/.test(guard) && /statusCode: 401/.test(guard) && /isOpenPath\(path\)/.test(guard), true)
+const { isOpenPath } = await import('../server/utils/open-paths')
+check('  only the health check and Shopify\'s signed webhooks pass without a login',
+  ['/api/health', '/api/webhooks/compliance', '/api/webhooks/app-uninstalled', '/api/size-charts/list', '/api/size-charts/summary', '/api/size-charts/1', '/api/shop', '/api/healthz', '/api/webhooksx', '/api/health/../size-charts/list'].map(isOpenPath),
+  [true, true, true, false, false, false, false, false, false, false])
 const compose = read('docker-compose.yml')
-check('the container listens on the server only, on 3003 (Logistics has 3002)', /"127\.0\.0\.1:3003:3000"/.test(compose), true)
+// 2026-09-23: 3003 was first chosen here, but chinaops.tudoholic.com already
+// has it on the server (its web-server config) — the container could never start.
+const hostPorts = [...compose.matchAll(/"127\.0\.0\.1:(\d+):3000"/g)].map(match => Number(match[1]))
+check('the container listens on the server only, on 3004', hostPorts, [3004])
+check('  never on a port the server\'s other sites hold (delivery 3001, Logistics 3002, chinaops 3003)', hostPorts.some(port => [3001, 3002, 3003].includes(port)), false)
 check('  with its own database in its own folder', /DATABASE_URL: "\/app\/data\/db\.sqlite"/.test(compose) && /\.\/data:\/app\/data/.test(compose), true)
 check('secrets never enter the image', read('.dockerignore').split('\n').includes('.env'), true)
 check('secrets and the database never enter git', ['.env', '*.sqlite'].every(line => read('.gitignore').split('\n').includes(line)), true)

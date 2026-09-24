@@ -10,11 +10,17 @@ let _db: BetterSQLite3Database<typeof tables> | null = null
  * DATABASE_URL (docker-compose); a laptop uses server/db/db.sqlite. A server
  * with neither refuses to start rather than quietly writing somewhere else.
  */
-export function useDb(): BetterSQLite3Database<typeof tables> {
-  if (_db) return _db
+/** The database file. The supplier pictures are kept in a folder beside it. */
+export function databasePath(): string {
   const file = process.env.DATABASE_URL
     || (import.meta.dev ? `${useRuntimeConfig().dbDir}/db.sqlite` : '')
   if (!file) throw new Error('No database configured: set DATABASE_URL')
+  return file
+}
+
+export function useDb(): BetterSQLite3Database<typeof tables> {
+  if (_db) return _db
+  const file = databasePath()
   const sqlite = new Database(file)
   // Readers never wait for a writer, which matters once reading jobs run
   // beside the review page.
