@@ -63,8 +63,9 @@ the end. It ends with "Done. Every table matches Logistics". Then:
 docker compose up -d
 ```
 
-Run it a second time and it refuses, so nothing can be doubled. Size charts
-comes out of Logistics only after the charts show in this app (step 6).
+Run it a second time and it refuses, so nothing can be doubled. Logistics no
+longer shows Size charts (removed 2026-09-24); its four tables and
+server/db/size-chart-images stay only as this copy's source and a backup.
 
 ## 4. The web server and certificate (server, admin with sudo)
 
@@ -114,3 +115,13 @@ docker logs tudoholic-size-charts --tail 30
 ```
 
 There should be no `[login] refused` line.
+
+Once the charts show here, the reading key has no business in Logistics any
+more. Delete its line there (nothing in Logistics reads it since 2026-09-24):
+
+```
+sed -i '/^ANTHROPIC_API_KEY=/d; /^SIZE_CHART_READER_MODEL=/d' /srv/apps/tudoholic-logistics-app/.env
+```
+
+It leaves the running Logistics as it is; its next `./deploy_logistics` starts
+it without the key.
