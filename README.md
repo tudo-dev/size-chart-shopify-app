@@ -10,9 +10,13 @@ deployed beside it, but completely separate: its own Shopify app, permissions
 
 ## Run it on a laptop
 
+Live on tudoholic-com.myshopify.com since 2026-09-25. `shopify app dev` no
+longer moves the app's address to the laptop (`automatically_update_urls_on_dev
+= false`), so the store keeps opening the server. Check changes with the
+commands below, then deploy with `~/deploy_sizecharts` on the server.
+
 ```
 pnpm install
-shopify app dev
 ```
 
 ## Checks

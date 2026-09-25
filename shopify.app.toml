@@ -8,8 +8,9 @@ application_url = "https://sizecharts.tudoholic.com/"
 embedded = true
 
 [build]
-include_config_on_deploy = true
-automatically_update_urls_on_dev = true
+# false since the app went live on tudoholic-com (2026-09-25): with true, a
+# `shopify app dev` on a laptop would point the LIVE app at that laptop.
+automatically_update_urls_on_dev = false
 
 [access_scopes]
 # Products and files only — see server/utils/scopes.ts. `pnpm verify` fails

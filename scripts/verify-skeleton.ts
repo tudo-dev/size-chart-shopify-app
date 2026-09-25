@@ -149,6 +149,9 @@ check('  its webhooks speak the same API version as the server code', /api_versi
 check('  every webhook it names exists', ['/api/webhooks/app-uninstalled', '/api/webhooks/compliance'].map(path => toml.includes(`https://sizecharts.tudoholic.com${path}"`) && existsSync(join(repo, `server${path}.post.ts`))), [true, true])
 check('  all three privacy topics are answered', /compliance_topics = \[ "customers\/data_request", "customers\/redact", "shop\/redact" \]/.test(toml), true)
 check('  no secret is in it', /secret/i.test(toml.replace(/the secret is never in this file/, '')), false)
+// 2026-09-25: live on tudoholic-com, so a laptop's `shopify app dev` must never
+// repoint the live app at a tunnel (the Logistics toml trap).
+check('  `shopify app dev` cannot move the live app to a laptop', /^automatically_update_urls_on_dev = false$/m.test(toml), true)
 
 // ---------------------------------------------------------------------------
 section('Where things are wired')

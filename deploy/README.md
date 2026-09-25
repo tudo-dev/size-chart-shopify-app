@@ -22,6 +22,20 @@ In `.env`, fill in:
 - `SHOPIFY_API_KEY` and `SHOPIFY_API_SECRET`: THIS app's, not Logistics'.
   On the laptop, in the size-chart-shopify-app folder, `shopify app env show`
   prints them. Type them into the server's `.env` only, never into a chat.
+  Without the editor (how it was done 2026-09-25): the key is public, so
+
+  ```
+  sed -i 's|^SHOPIFY_API_KEY=.*|SHOPIFY_API_KEY=0f8e54d5b874a56aeda52d19d0a5006a|' .env
+  ```
+
+  and the secret is pasted where nothing shows or keeps it:
+
+  ```
+  read -rsp 'Paste the secret and press Enter: ' S; S=${S#*=}; S=${S//[[:space:]]/}; sed -i "s|^SHOPIFY_API_SECRET=.*|SHOPIFY_API_SECRET=$S|" .env; unset S; echo
+  grep -c '^SHOPIFY_API_SECRET=shpss_[0-9a-f]\{32\}$' .env
+  ```
+
+  The last line prints 1.
 - `SHOPIFY_APP_URL=https://sizecharts.tudoholic.com` (already filled)
 - `ALLOWED_SHOPS=tudoholic-com.myshopify.com` (already filled). Left empty,
   nobody can log in.
@@ -69,6 +83,8 @@ server/db/size-chart-images stay only as this copy's source and a backup.
 
 ## 4. The web server and certificate (server, admin with sudo)
 
+The `deploy` user is in the sudo group; `sudo` asks for its password.
+
 ```
 sudo cp /srv/apps/size-chart-shopify-app/deploy/nginx/sizecharts.tudoholic.com.conf /etc/nginx/sites-enabled/
 sudo nginx -t && sudo systemctl reload nginx
@@ -76,6 +92,19 @@ sudo certbot --nginx -d sizecharts.tudoholic.com
 ```
 
 Check: https://sizecharts.tudoholic.com/api/health shows `{"ok":true}`.
+
+Certbot writes `listen 443 ssl;` into the live file, while every other site on
+this server has `listen 443 ssl http2;`, and `nginx -t` then warns "protocol
+options redefined for 0.0.0.0:443". Make it match (done 2026-09-25):
+
+```
+sudo sed -i 's/^\(\s*\)listen 443 ssl; # managed by Certbot$/\1listen 443 ssl http2; # managed by Certbot/' /etc/nginx/sites-enabled/sizecharts.tudoholic.com.conf
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+From then on the live file holds certbot's lines and is no longer the same as
+`deploy/nginx/`. Never copy the repo file over it again. Keep backups in `~`,
+never in `sites-enabled/`: nginx loads every file in that folder.
 
 While the admin is here, add these two lines inside `location /api/ { ... }`
 in `/etc/nginx/sites-enabled/tudoholic-logistics-app.conf`, just under
@@ -100,9 +129,14 @@ shopify app deploy
 This points the app at sizecharts.tudoholic.com. Until then it still points at
 the laptop test address from `shopify app dev`.
 
-Then, in the Shopify dev dashboard: **Tudoholic Size Charts → Distribution →
-Custom distribution**, store `tudoholic-com.myshopify.com`. Open the install
-link while logged in to the live store, and install.
+Then install it on the store. The app lives in organization **132074704**
+(`shopify app info` prints it), not the other "Tudoholic" one:
+https://dev.shopify.com/dashboard/132074704/apps → Tudoholic Size Charts →
+Distribution (it opens the Partner Dashboard) → **Custom distribution** (for
+good: it cannot be changed) → store `tudoholic-com.myshopify.com`, multi-store
+box unticked (the store is not on Plus) → Generate link → open the link while
+logged in to the live store → Install. "Install app" on the dev dashboard only
+offers the logx test store. Done 2026-09-25.
 
 ## 6. The first check
 
