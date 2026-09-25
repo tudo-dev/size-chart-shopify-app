@@ -406,12 +406,16 @@
     </div>
 
     <!-- One chart, in full -->
+    <!-- Polaris Vue takes the title as a slot (a title attribute is dropped), and sectioned gives the body its padding. -->
     <Modal
       :open="detailOpen"
-      :title="detailTitle"
       size="large"
+      sectioned
       @close="closeChart"
     >
+      <template #title>
+        {{ detailTitle }}
+      </template>
       <div class="detail">
         <div
           v-if="detailError"

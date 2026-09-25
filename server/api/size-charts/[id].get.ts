@@ -10,6 +10,7 @@ import { getVerifiedShopUrl } from '../../utils/shopify'
 import { chartById, chartRowById, parseChart, parseRead } from '../../utils/size-chart-store'
 import { imageDataUrl } from '../../utils/size-chart-images'
 import { renderChartSvg } from '../../../shared/size-chart/render-svg'
+import { customerNotes } from '../../../shared/size-chart/chart'
 
 export default defineEventHandler(async (event) => {
   try {
@@ -21,7 +22,9 @@ export default defineEventHandler(async (event) => {
     const record = chartById(id)
     const row = chartRowById(id, shopHandle)
     if (!record || !row) throw createError({ statusCode: 404, statusMessage: 'That chart is not in the list any more.' })
-    const chart = parseChart(record.chartJson)
+    const stored = parseChart(record.chartJson)
+    // The notes as the website shows them, so the page never shows one the website leaves out.
+    const chart = stored ? { ...stored, notes: customerNotes(stored.notes ?? []) } : null
     const title = row.products[0]?.title ?? `1688 product ${row.sourceProductId}`
     return {
       success: true,

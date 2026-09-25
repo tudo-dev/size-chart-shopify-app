@@ -26,7 +26,7 @@ import { normaliseSourceProductId, parseSizeChartWorkbook, sourceIdFromUrl } fro
 import type { XlsxSheet } from './lib/xlsx'
 import { glossaryForPrompt, MEASURES, measureFromHeading, measureLabel } from '../shared/size-chart/glossary'
 import { cmToInches, formatValue, kgToPounds, parseCell } from '../shared/size-chart/values'
-import { chartSummary, normaliseChart, pivotToSoldSizes, READ_CHART_SCHEMA, sizeKey, sizesOf } from '../shared/size-chart/chart'
+import { chartSummary, isUnitStatement, normaliseChart, pivotToSoldSizes, READ_CHART_SCHEMA, sizeKey, sizesOf } from '../shared/size-chart/chart'
 import type { ReadChart } from '../shared/size-chart/chart'
 import { escapeXml, renderChartSvg } from '../shared/size-chart/render-svg'
 
@@ -221,6 +221,22 @@ check('weight in 斤 becomes kg and lb', outcome.chart.tables[1]!.rows[0], { siz
 check('the supplier\'s 31-after-60 typo is flagged', outcome.assessment.flags, ['Shoulder: 60 then 31 for size XXL looks like a typo in the supplier\'s table.'])
 check('one flag costs 0.15 and stops auto-approval', [outcome.assessment.confidence, outcome.assessment.autoApprove], [0.85, false])
 check('notes are kept', outcome.chart.notes, ['Measured flat by hand; allow 2-4 cm.'])
+// The website shows its own units, so a supplier note naming the table's unit is wrong there.
+check('a note that only names the unit is left out; advice, even with a unit in it, is kept', [
+  'All measurements above are in millimetres.',
+  'Unit: cm',
+  'The unit of measurement is centimetres.',
+  'All data above is measured in centimeters.',
+  'The data in the table is in cm',
+  'Measurements in cm.',
+  'Sizes are shown in inches',
+  'Measured flat by hand; allow 2-4 cm.',
+  'Left and right feet can differ slightly; use the measurement of the larger foot.',
+  'If you have a high instep or wide feet, we suggest buying one size up.',
+  'Slim fit; choose one size up for a loose fit.',
+  'Stand on a sheet of paper and mark the longest point at the front and back with a pen.',
+].map(isUnitStatement), [true, true, true, true, true, true, true, false, false, false, false, false])
+check('  a new reading keeps only the notes a customer should see', normaliseChart({ ...jacket, notes: ['All measurements above are in millimetres.', 'Measured flat by hand; allow 2-4 cm.'] }).chart.notes, ['Measured flat by hand; allow 2-4 cm.'])
 check('the summary line', chartSummary(outcome.chart), '2 tables, 4 sizes (S to XXL)')
 check('sizes in printed order, once each', sizesOf(outcome.chart), ['S', 'M', 'XL', 'XXL'])
 
@@ -574,6 +590,7 @@ check('the prompt carries the word list, the one-row-per-size rule and the try-o
   prompt.system.includes('试穿报告'),
   prompt.system.includes('Never translate or convert a cell'),
 ], [true, true, true, true])
+check('the reader is told to leave out a note that only names the unit', prompt.system.includes('Leave out a note that only says which unit the table uses'), true)
 check('the product context is named', prompt.user, 'Product: Women’s Hoodie. Type: Hoodies. Sold as: women\'s.\n\nTranscribe the size chart in this picture.')
 check('an odd answer is held to shape: unknown keys become other/unknown, missing bits empty', reader.toReadChart({
   isSizeChart: true,
@@ -920,6 +937,8 @@ section('To the website: the chart goes on the right products, and only there')
   const wide = storefront.toStorefrontChart(tee)
   check('the website gets "label" for the size, never "size" (a Liquid word for length)', [wide.tables[0]!.rows.map(r => r.label), 'size' in (wide.tables[0]!.rows[0] as object)], [tee.tables[0]!.rows.map(r => r.size), false])
   check('  and knows whether to offer the inch/cm switch', [wide.units, storefront.toStorefrontChart({ v: 1, notes: [], tables: [{ title: 'Shoe sizes', columns: [{ label: 'Size', metric: null, imperial: null }, { label: 'EU', metric: null, imperial: null }], rows: [{ size: '38', metric: ['38'], imperial: ['38'] }] }] }).units], [true, false])
+  // A chart read before the rule may still hold the note; the website copy never does.
+  check('  and a chart read before the rule reaches the website without "all measurements are in mm"', storefront.toStorefrontChart({ ...tee, notes: ['All measurements above are in millimetres.', 'Measured flat by hand; allow 2-4 cm.'] }).notes, ['Measured flat by hand; allow 2-4 cm.'])
 
   // No product carries the id at all.
   store.upsertSheetRows([{ rowNumber: 1, sourceProductId: '800000000002', productType: 'Hoodies', store: 'MENS', imageUrl: 'https://x/h.png', sourceUrl: null, remark: null }], '2026-09-25 12:00:00')

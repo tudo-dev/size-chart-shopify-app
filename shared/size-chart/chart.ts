@@ -336,6 +336,32 @@ function isNumeric(value: ChartValue): value is Extract<ChartValue, { kind: 'num
 }
 
 /** Sizes a chart covers, in the order printed, once each. */
+const UNIT_WORD = String.raw`(?:mm|millimet(?:er|re)s?|cm|centimet(?:er|re)s?|inch(?:es)?|kg|kilo(?:gram)?s?|grams?|jin|catties|chi|met(?:er|re)s?)\b`
+const UNIT_STATEMENTS = [
+  // "Unit: cm", "The unit of measurement is millimetres"
+  new RegExp(String.raw`\bunits?\b[^.;]*?\b${UNIT_WORD}`, 'i'),
+  // "All measurements above are in millimetres", "The data in the table is measured in cm"
+  new RegExp(String.raw`\b(?:measurements?|data|figures|numbers|values|dimensions|sizes|lengths?|weights?|heights?)\b(?:\s+[\w-]+){0,4}?\s+(?:are|is|were|was)\s+(?:(?:all|given|shown|listed|measured|stated|expressed|recorded|taken)\s+)?in\s+${UNIT_WORD}`, 'i'),
+  // "Measurements in cm.", "In cm"
+  new RegExp(String.raw`^(?:(?:all\s+)?(?:the\s+)?(?:measurements?|data|sizes|dimensions|figures)\s+)?(?:are\s+)?in\s+${UNIT_WORD}\.?$`, 'i'),
+]
+
+/**
+ * A supplier note that only says which unit the table is in ("All
+ * measurements above are in millimetres", "Unit: cm"). The app converts
+ * every figure and labels its own units, so on the website such a note is
+ * wrong: the table shows inches or centimetres. A note with a number in it
+ * is advice ("allow 1-3 cm") and is kept.
+ */
+export function isUnitStatement(note: string): boolean {
+  return !/\d/.test(note) && UNIT_STATEMENTS.some(pattern => pattern.test(note))
+}
+
+/** The supplier notes a customer should see: every note but a statement of units. */
+export function customerNotes(notes: readonly string[]): string[] {
+  return notes.filter(note => !isUnitStatement(note))
+}
+
 export function sizesOf(chart: PublishedChart): string[] {
   const seen = new Set<string>()
   for (const table of chart.tables) {
@@ -463,7 +489,7 @@ export function normaliseChart(read: ReadChart, options: NormaliseOptions = {}):
     }
   }
 
-  const notes = read.notes.map(note => note.replace(/\s+/g, ' ').trim()).filter(note => note !== '').slice(0, 5)
+  const notes = customerNotes(read.notes.map(note => note.replace(/\s+/g, ' ').trim()).filter(note => note !== '')).slice(0, 5)
   const confidence = read.isSizeChart ? Math.max(0, Math.round((1 - 0.15 * flags.length) * 100) / 100) : 0
 
   return {

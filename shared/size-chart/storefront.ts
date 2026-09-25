@@ -12,6 +12,7 @@
  */
 
 import { createHash } from 'node:crypto'
+import { customerNotes } from './chart'
 import type { PublishedChart, PublishedColumn, PublishedTable } from './chart'
 
 /** Where the chart lives on each product. `$app:` makes it this app's own: merchants see it read-only and no other app can change it. */
@@ -68,7 +69,8 @@ export function toStorefrontChart(chart: PublishedChart): StorefrontChart {
       columns: table.columns.map(column => ({ label: column.label, metric: column.metric, imperial: column.imperial })),
       rows: table.rows.map(row => ({ label: row.size, metric: row.metric, imperial: row.imperial })),
     })),
-    notes: chart.notes ?? [],
+    // Charts read before the rule may still hold "all measurements are in mm".
+    notes: customerNotes(chart.notes ?? []),
   }
 }
 
