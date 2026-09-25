@@ -59,6 +59,10 @@ const images = await import('../server/utils/size-chart-images')
 const jobs = await import('../server/utils/size-chart-jobs')
 const reader = await import('../server/utils/size-chart-reader')
 const settings = await import('../server/utils/app-settings')
+const publish = await import('../server/utils/size-chart-publish')
+const publications = await import('../server/utils/size-chart-publications')
+const storefront = await import('../shared/size-chart/storefront')
+const theme = await import('../server/utils/size-chart-theme')
 
 // ---------------------------------------------------------------------------
 section('The listing team\'s sheet')
@@ -713,6 +717,507 @@ await new Promise(resolve => setTimeout(resolve, 10))
 check('no follow-up after a crash', followedAfterCrash, 0)
 
 writeFileSync(join(scratchDir, 'chart.svg'), svg)
+
+// ---------------------------------------------------------------------------
+section('To the website: the chart goes on the right products, and only there')
+
+{
+  const { createHash } = await import('node:crypto')
+  const APP_NS = 'app--777--size_chart'
+  interface FakeProduct { id: string, handle: string, title: string, status: string, onlineStoreUrl: string | null, templateSuffix: string | null, source: string | null, chart: { value: string, digest: string } | null }
+  const store2 = new Map<string, FakeProduct>()
+  const definitions: { id: string, namespace: string, key: string, access: { admin: string, storefront: string } }[] = []
+  const calls: { op: string, variables?: Record<string, unknown> }[] = []
+  const faults = {
+    throttleNext: 0,
+    rejectSetFor: '' as string,
+    corruptReadFor: '' as string,
+    raceOnceFor: '' as string,
+    rejectDeleteFor: '' as string,
+    /** Apply the write, then lose the answer (a timeout after Shopify took it). */
+    applyThenThrowFor: '' as string,
+    /** Every read of this product fails (after its write). */
+    failReadsFor: '' as string,
+    /** Run this during the next write, as a person would press a button meanwhile. */
+    duringNextSet: null as null | (() => void),
+    definitionDown: false,
+  }
+  let digestCounter = 0
+  const digestOf = (value: string) => createHash('sha256').update(`${value}#${++digestCounter}`).digest('hex')
+
+  const fake: import('../server/utils/size-chart-publish').GraphqlRequester = {
+    request: async (query, options) => {
+      const variables = options?.variables
+      const op = /(query|mutation)\s+(\w+)/.exec(query)?.[2] ?? 'unknown'
+      calls.push({ op, variables })
+      if (faults.throttleNext > 0) {
+        faults.throttleNext--
+        throw new Error('Throttled')
+      }
+      if (op === 'SizeChartDefinition' && faults.definitionDown) throw new Error('Shopify is not answering')
+      if (op === 'SizeChartDefinition') return { data: { metafieldDefinitions: { nodes: definitions.map(d => ({ ...d, type: { name: 'json' } })) } } }
+      if (op === 'CreateSizeChartDefinition') {
+        const definition = variables!.definition as Record<string, unknown>
+        if (definitions.length > 0) return { data: { metafieldDefinitionCreate: { createdDefinition: null, userErrors: [{ field: ['definition'], message: 'Key is in use', code: 'TAKEN' }] } } }
+        const made = { id: 'gid://shopify/MetafieldDefinition/1', namespace: APP_NS, key: String(definition.key), access: definition.access as { admin: string, storefront: string } }
+        definitions.push(made)
+        return { data: { metafieldDefinitionCreate: { createdDefinition: { ...made, type: { name: String(definition.type) } }, userErrors: [] } } }
+      }
+      if (op === 'ProductChartState') {
+        if (faults.failReadsFor === String(variables!.id)) throw new Error('fetch failed')
+        const product = store2.get(String(variables!.id))
+        if (!product) return { data: { product: null } }
+        let chart = variables!.namespace === APP_NS && product.chart ? { value: product.chart.value, compareDigest: product.chart.digest } : null
+        if (chart && faults.corruptReadFor === product.id) chart = { ...chart, value: `${chart.value} ` }
+        return { data: { product: { id: product.id, handle: product.handle, title: product.title, status: product.status, onlineStoreUrl: product.onlineStoreUrl, templateSuffix: product.templateSuffix, source: product.source === null ? null : { value: product.source }, chart } } }
+      }
+      if (op === 'SetSizeChart') {
+        const input = (variables!.metafields as Record<string, unknown>[])[0]!
+        const product = store2.get(String(input.ownerId))
+        if (!('compareDigest' in input)) throw new Error('TEST: compareDigest was left out')
+        if (input.namespace !== '$app:size_chart' || input.key !== 'chart' || input.type !== 'json') throw new Error(`TEST: wrong field ${String(input.namespace)}/${String(input.key)}/${String(input.type)}`)
+        if (!product) return { data: { metafieldsSet: { metafields: [], userErrors: [{ field: ['ownerId'], message: 'Owner does not exist', code: 'INVALID' }] } } }
+        if (faults.rejectSetFor === product.id) return { data: { metafieldsSet: { metafields: [], userErrors: [{ field: ['value'], message: 'Value is invalid JSON', code: 'INVALID_VALUE' }] } } }
+        if (faults.raceOnceFor === product.id) {
+          faults.raceOnceFor = ''
+          product.chart = { value: '{"someone":"else"}', digest: digestOf('race') }
+        }
+        if (faults.duringNextSet) {
+          const during = faults.duringNextSet
+          faults.duringNextSet = null
+          during()
+        }
+        const current = product.chart?.digest ?? null
+        if (input.compareDigest !== current) return { data: { metafieldsSet: { metafields: [], userErrors: [{ field: ['compareDigest'], message: 'The resource has been updated since it was loaded.', code: 'INVALID_COMPARE_DIGEST' }] } } }
+        product.chart = { value: String(input.value), digest: digestOf(String(input.value)) }
+        if (faults.applyThenThrowFor === product.id) {
+          faults.applyThenThrowFor = ''
+          throw new Error('The operation was aborted due to timeout')
+        }
+        return { data: { metafieldsSet: { metafields: [{ id: 'gid://shopify/Metafield/9', namespace: APP_NS, key: 'chart', owner: { id: product.id } }], userErrors: [] } } }
+      }
+      if (op === 'RemoveSizeChart') {
+        const input = (variables!.metafields as Record<string, unknown>[])[0]!
+        const product = store2.get(String(input.ownerId))
+        if (faults.rejectDeleteFor === String(input.ownerId)) return { data: { metafieldsDelete: { deletedMetafields: [null], userErrors: [{ field: ['metafields'], message: 'Not allowed' }] } } }
+        const had = product?.chart && (input.namespace === APP_NS || input.namespace === '$app:size_chart')
+        if (had && product) product.chart = null
+        return { data: { metafieldsDelete: { deletedMetafields: [had ? { ownerId: input.ownerId, namespace: APP_NS, key: 'chart' } : null], userErrors: [] } } }
+      }
+      throw new Error(`TEST: unexpected Shopify call ${op}`)
+    },
+  }
+  const opsSince = (from: number) => calls.slice(from).map(call => call.op)
+  const noSleep = async () => {}
+  const patient = publish.patientClient(fake, noSleep)
+
+  // Shopify knows the field once, with the right locks.
+  const ns = await publish.ensureChartDefinition(patient)
+  check('the size chart field is made once: json, read-only for staff, readable by the storefront', [ns, definitions.length, definitions[0]?.access], [APP_NS, 1, { admin: 'MERCHANT_READ', storefront: 'PUBLIC_READ' }])
+  check('  asking again finds it and makes nothing new', [await publish.ensureChartDefinition(patient), definitions.length], [APP_NS, 1])
+  check('  a namespace is ours only in Shopify\'s own form', [publish.isChartNamespace('app--123--size_chart'), publish.isChartNamespace('custom'), publish.isChartNamespace('app--123--other')], [true, false, false])
+
+  // Two products carry the 1688 id; a third carries another id.
+  const tee = normaliseChart(clean, { store: 'MENS' }).chart
+  store.upsertSheetRows([{ rowNumber: 1, sourceProductId: '800000000001', productType: 'T-Shirts', store: 'MENS', imageUrl: 'https://x/tee.png', sourceUrl: null, remark: null }], '2026-09-25 09:00:00')
+  const teeRecord = store.chartsWithStatus(['queued'], ['800000000001'])[0]!
+  store.markRead(teeRecord.id, { read: clean, chart: tee, flags: [], notices: [], confidence: 1, autoApprove: false, model: 'm', tokensIn: 1, tokensOut: 1 }, '2026-09-25 09:01:00')
+  const addProduct = (p: Partial<FakeProduct> & { id: string, source: string | null }) => {
+    const full: FakeProduct = { handle: p.id.split('/').pop()!, title: `Product ${p.id.split('/').pop()}`, status: 'ACTIVE', onlineStoreUrl: `https://tudoholic.com/products/${p.id.split('/').pop()}`, templateSuffix: null, chart: null, ...p }
+    store2.set(full.id, full)
+    return full
+  }
+  const pA = addProduct({ id: 'gid://shopify/Product/101', source: '800000000001' })
+  const pB = addProduct({ id: 'gid://shopify/Product/102', source: '{"text":"","url":"https://detail.1688.com/offer/800000000001.html"}', templateSuffix: 'kids' })
+  products.saveProductSources([
+    { shopifyProductId: pA.id, handle: pA.handle, title: pA.title, productType: 'T-Shirts', status: 'ACTIVE', sourceProductId: '800000000001', sourceUrl: null, sizeOptions: null },
+    { shopifyProductId: pB.id, handle: pB.handle, title: pB.title, productType: 'T-Shirts', status: 'ACTIVE', sourceProductId: '800000000001', sourceUrl: null, sizeOptions: null },
+  ], '2026-09-25 09:02:00')
+
+  const notApproved = await publish.publishChart(patient, store.chartById(teeRecord.id)!, ns, '2026-09-25 09:03:00')
+  check('a chart nobody approved never goes to the website', [notApproved.error, pA.chart, pB.chart], ['Only an approved chart can go to the website.', null, null])
+
+  store.approveChart(teeRecord.id, 'tudoholic-com.myshopify.com', null, '2026-09-25 09:04:00')
+  const expected = storefront.storefrontValue(tee)
+  let mark = calls.length
+  const first = await publish.publishChart(patient, store.chartById(teeRecord.id)!, ns, '2026-09-25 09:05:00')
+  check('approved: it reaches both products that carry the 1688 id (one keeps it as a link)', [first.status, first.written, first.unchanged, first.failed.length], ['published', 2, 0, 0])
+  check('  exactly the approved chart, as the website reads it', [pA.chart?.value === expected.json, pB.chart?.value === expected.json], [true, true])
+  check('  each product checked in Shopify, written, then read back', opsSince(mark), ['ProductChartState', 'SetSizeChart', 'ProductChartState', 'ProductChartState', 'SetSizeChart', 'ProductChartState'])
+  check('  a first write says "only if it has no chart yet" (compareDigest null)', calls.filter(c => c.op === 'SetSizeChart').slice(-2).map(c => (c.variables!.metafields as Record<string, unknown>[])[0]!.compareDigest), [null, null])
+  const liveRow = store.chartRowById(teeRecord.id, 'tudoholic-com')!
+  check('  the app records both as live, with their pages, and flags the product on its own layout', [liveRow.status, liveRow.live.map(l => [l.productId, l.url, l.templateSuffix, l.current])], ['published', [[pA.id, 'https://tudoholic.com/products/101', null, true], [pB.id, 'https://tudoholic.com/products/102', 'kids', true]]])
+  check('  the count of what customers can see', publications.countLiveProducts(), { products: 2, charts: 1 })
+
+  mark = calls.length
+  const updatedBefore = store.chartById(teeRecord.id)!.updatedAt
+  const again = await publish.publishChart(patient, store.chartById(teeRecord.id)!, ns, '2026-09-25 09:30:00')
+  check('sending again changes nothing: no write, the row keeps its place', [again.status, again.written, again.unchanged, opsSince(mark).includes('SetSizeChart'), store.chartById(teeRecord.id)!.updatedAt === updatedBefore], ['published', 0, 2, false, true])
+
+  // A third product joins with the same id (a re-listing), one leaves it.
+  const pC = addProduct({ id: 'gid://shopify/Product/103', source: '800000000001' })
+  products.saveProductSources([{ shopifyProductId: pC.id, handle: pC.handle, title: pC.title, productType: 'T-Shirts', status: 'ACTIVE', sourceProductId: '800000000001', sourceUrl: null, sizeOptions: null }], '2026-09-25 10:00:00')
+  pB.source = '800000000999'
+  const topUp = await publish.publishChart(patient, store.chartById(teeRecord.id)!, ns, '2026-09-25 10:01:00')
+  check('a product added since gets it; a product whose 1688 id changed loses it', [topUp.status, topUp.written, topUp.unchanged, topUp.removed, pC.chart?.value === expected.json, pB.chart], ['published', 1, 1, 1, true, null])
+  check('  and the reason is written down', topUp.skipped.map(s => s.reason), ['it now carries the 1688 id 800000000999'])
+  check('  the app\'s record follows Shopify', store.chartRowById(teeRecord.id, null)!.live.map(l => l.productId).sort(), [pA.id, pC.id].sort())
+
+  // Gone from Shopify.
+  store2.delete(pC.id)
+  const gone = await publish.publishChart(patient, store.chartById(teeRecord.id)!, ns, '2026-09-25 10:05:00')
+  check('a product deleted in Shopify drops out of the record and the product map', [gone.status, gone.skipped.at(-1)?.reason, products.productSourceById(pC.id), store.chartRowById(teeRecord.id, null)!.live.length], ['published', 'the product is no longer in the store', null, 1])
+
+  // The chart changes (read again with a new picture, approved again): replaced with the digest.
+  const tee2 = normaliseChart(jacket, { store: 'MENS' }).chart
+  store.updateChart(teeRecord.id, { chartJson: JSON.stringify(tee2), status: 'approved' })
+  const digestBefore = pA.chart!.digest
+  const replaced = await publish.publishChart(patient, store.chartById(teeRecord.id)!, ns, '2026-09-25 11:00:00')
+  check('a changed chart replaces the old one, only if nobody changed it since it was read', [replaced.status, replaced.written, pA.chart?.value === storefront.storefrontValue(tee2).json, (calls.filter(c => c.op === 'SetSizeChart').at(-1)!.variables!.metafields as Record<string, unknown>[])[0]!.compareDigest === digestBefore], ['published', 1, true, true])
+
+  // Someone else changes it between the read and the write: read again, try once more.
+  store.updateChart(teeRecord.id, { chartJson: JSON.stringify(tee), status: 'approved' })
+  faults.raceOnceFor = pA.id
+  const raced = await publish.publishChart(patient, store.chartById(teeRecord.id)!, ns, '2026-09-25 11:10:00')
+  check('a change in between is noticed and the write is tried again, fresh', [raced.status, raced.written, pA.chart?.value === expected.json], ['published', 1, true])
+
+  // Shopify busy: waits and asks again.
+  store.updateChart(teeRecord.id, { chartJson: JSON.stringify(tee2), status: 'approved' })
+  faults.throttleNext = 2
+  const busy = await publish.publishChart(patient, store.chartById(teeRecord.id)!, ns, '2026-09-25 11:20:00')
+  check('when Shopify says it is busy, the app waits and asks again', [busy.status, busy.written, faults.throttleNext], ['published', 1, 0])
+
+  // Shopify refuses one product: the chart says so, and nothing false is recorded.
+  const pD = addProduct({ id: 'gid://shopify/Product/104', source: '800000000001' })
+  products.saveProductSources([{ shopifyProductId: pD.id, handle: pD.handle, title: pD.title, productType: 'T-Shirts', status: 'ACTIVE', sourceProductId: '800000000001', sourceUrl: null, sizeOptions: null }], '2026-09-25 11:30:00')
+  faults.rejectSetFor = pD.id
+  const refused = await publish.publishChart(patient, store.chartById(teeRecord.id)!, ns, '2026-09-25 11:31:00')
+  faults.rejectSetFor = ''
+  check('a product Shopify refuses: "did not reach" with the reason; the others stay live', [refused.status, refused.failed.map(f => f.reason), store.chartById(teeRecord.id)!.status, /did not reach one product: Product 104: Value is invalid JSON\. It is on 1 product\. Send it again to retry\./.test(store.chartById(teeRecord.id)!.error ?? ''), store.chartRowById(teeRecord.id, null)!.live.map(l => l.productId)], ['publish-failed', ['Value is invalid JSON'], 'publish-failed', true, [pA.id]])
+  const retried = await publish.publishChart(patient, store.chartById(teeRecord.id)!, ns, '2026-09-25 11:40:00')
+  check('  sending again reaches it', [retried.status, retried.written, store.chartById(teeRecord.id)!.error], ['published', 1, null])
+
+  // A write that does not read back the same: undone at once, and the whole run stops.
+  store.updateChart(teeRecord.id, { chartJson: JSON.stringify(tee), status: 'approved' })
+  faults.corruptReadFor = pA.id
+  let stopped = ''
+  try {
+    await publish.publishChart(patient, store.chartById(teeRecord.id)!, ns, '2026-09-25 11:50:00')
+  }
+  catch (error) {
+    stopped = error instanceof publish.ReadBackError ? 'stopped' : `other: ${String(error)}`
+  }
+  faults.corruptReadFor = ''
+  check('a chart that does not read back is taken off again and the run stops', [stopped, pA.chart, store.chartById(teeRecord.id)!.status], ['stopped', null, 'publish-failed'])
+  check('  and the record never says it is live', store.chartRowById(teeRecord.id, null)!.live.some(l => l.productId === pA.id), false)
+  await publish.publishChart(patient, store.chartById(teeRecord.id)!, ns, '2026-09-25 11:55:00')
+
+  // Safety of the chart itself.
+  const broken = { ...tee, tables: [{ ...tee.tables[0]!, rows: [{ size: 'M', metric: ['1'], imperial: ['1'] }] }] }
+  check('a chart whose figures do not line up with its headings is refused before anything is sent', storefront.storefrontProblems(broken).length > 0, true)
+  check('  as is one with no table, and one too long for the website', [storefront.storefrontProblems({ v: 1, tables: [], notes: [] }), storefront.storefrontProblems({ ...tee, tables: Array.from({ length: 51 }, () => tee.tables[0]!) }).some(p => /at most 50/.test(p))], [['The chart has no table to show.'], true])
+  check('  and one bigger than Shopify holds (128 KB)', storefront.storefrontProblems({ ...tee, notes: ['x'.repeat(140 * 1024)] }).some(p => /at most 128 KB/.test(p)), true)
+  const wide = storefront.toStorefrontChart(tee)
+  check('the website gets "label" for the size, never "size" (a Liquid word for length)', [wide.tables[0]!.rows.map(r => r.label), 'size' in (wide.tables[0]!.rows[0] as object)], [tee.tables[0]!.rows.map(r => r.size), false])
+  check('  and knows whether to offer the inch/cm switch', [wide.units, storefront.toStorefrontChart({ v: 1, notes: [], tables: [{ title: 'Shoe sizes', columns: [{ label: 'Size', metric: null, imperial: null }, { label: 'EU', metric: null, imperial: null }], rows: [{ size: '38', metric: ['38'], imperial: ['38'] }] }] }).units], [true, false])
+
+  // No product carries the id at all.
+  store.upsertSheetRows([{ rowNumber: 1, sourceProductId: '800000000002', productType: 'Hoodies', store: 'MENS', imageUrl: 'https://x/h.png', sourceUrl: null, remark: null }], '2026-09-25 12:00:00')
+  const lonely = store.chartsWithStatus(['queued'], ['800000000002'])[0]!
+  store.markRead(lonely.id, { read: clean, chart: tee, flags: [], notices: [], confidence: 1, autoApprove: false, model: 'm', tokensIn: 1, tokensOut: 1 })
+  store.approveChart(lonely.id, 'shop', null)
+  const none = await publish.publishChart(patient, store.chartById(lonely.id)!, ns)
+  check('a chart no product carries says so and what to do', [none.status, none.error], ['publish-failed', 'No product in the store carries the 1688 id 800000000002. Press Sync products, then send it again.'])
+
+  // A new picture arrives for a live chart: the older chart stays on the website until replaced or taken off.
+  const liveBefore = store.chartRowById(teeRecord.id, null)!.live.length
+  store.upsertSheetRows([{ rowNumber: 1, sourceProductId: '800000000001', productType: 'T-Shirts', store: 'MENS', imageUrl: 'https://x/tee-new.png', sourceUrl: null, remark: null }], '2026-09-25 12:10:00')
+  const waitingRow = store.chartRowById(teeRecord.id, null)!
+  check('a new picture for a live chart: queued again, the older chart still shows, marked as older', [waitingRow.status, waitingRow.live.length === liveBefore && liveBefore > 0, waitingRow.live.every(l => !l.current)], ['queued', true, true])
+  check('  and it cannot be skipped while the older chart is live', store.skipChart(teeRecord.id, 'shop', null), { ok: false, reason: 'An older chart for this product is still on the website; take it off the website first.' })
+
+  // The older chart is still checked (never written): a relinked product loses it, a deleted one leaves the record.
+  check('  a check of the website takes it (to keep it honest), a plain send does not', [publish.chartsToPublish({ includePublished: true }).some(r => r.id === teeRecord.id), publish.chartsToPublish().some(r => r.id === teeRecord.id)], [true, false])
+  const olderOn = store.chartRowById(teeRecord.id, null)!.live.map(l => l.productId)
+  const relinked = store2.get(olderOn[0]!)!
+  relinked.source = '800000000555'
+  let setsBefore = calls.filter(c => c.op === 'SetSizeChart').length
+  const olderCheck = await publish.publishChart(patient, store.chartById(teeRecord.id)!, ns, '2026-09-25 12:12:00')
+  check('  checking the older chart: off the relinked product, nothing written, the new picture keeps its place', [olderCheck.removed, relinked.chart, calls.filter(c => c.op === 'SetSizeChart').length - setsBefore, store.chartById(teeRecord.id)!.status, store.chartRowById(teeRecord.id, null)!.live.some(l => l.productId === relinked.id)], [1, null, 0, 'queued', false])
+  relinked.source = '800000000001'
+
+  // Taking the older chart off.
+  check('taking it off: asked for first, written on the chart', store.requestWithdraw(teeRecord.id, 'tudoholic-com.myshopify.com', '2026-09-25 12:19:00'), { ok: true })
+  check('  the new picture keeps its place in the queue; the take-off waits to be done', [store.chartById(teeRecord.id)!.status, store.chartRowById(teeRecord.id, null)!.withdrawPending], ['queued', true])
+  const offWaiting = await publish.withdrawChart(patient, store.chartById(teeRecord.id)!, ns, '2026-09-25 12:20:00')
+  check('  done: off every product, the request closed', [offWaiting.failed.length, [...store2.values()].filter(p => p.chart).length, store.chartById(teeRecord.id)!.status, store.chartRowById(teeRecord.id, null)!.live.length, store.chartRowById(teeRecord.id, null)!.withdrawPending], [0, 0, 'queued', 0, false])
+
+  store.markRead(teeRecord.id, { read: clean, chart: tee, flags: [], notices: [], confidence: 1, autoApprove: false, model: 'm', tokensIn: 1, tokensOut: 1 })
+  store.approveChart(teeRecord.id, 'shop', null)
+  await publish.publishChart(patient, store.chartById(teeRecord.id)!, ns, '2026-09-25 12:30:00')
+  const liveNow = store.chartRowById(teeRecord.id, null)!.live.map(l => l.productId)
+
+  // A take-off Shopify half refuses must not be undone by the next check.
+  store.requestWithdraw(teeRecord.id, 'shop', '2026-09-25 12:39:00')
+  check('pressing Take off: the chart goes back to a person at once, before Shopify is even asked', [store.chartById(teeRecord.id)!.status, publish.chartsToPublish({ includePublished: true }).some(r => r.id === teeRecord.id)], ['needs-review', false])
+  check('  and it cannot be approved again until it is off', store.approveChart(teeRecord.id, 'shop', null).ok, false)
+  faults.rejectDeleteFor = liveNow[0]!
+  const halfOff = await publish.withdrawChart(patient, store.chartById(teeRecord.id)!, ns, '2026-09-25 12:40:00')
+  faults.rejectDeleteFor = ''
+  check('a removal Shopify refuses is reported; that product stays on the record; the request stays open', [halfOff.failed.map(f => f.productId), store.chartRowById(teeRecord.id, null)!.live.map(l => l.productId), store.chartById(teeRecord.id)!.status, store.chartRowById(teeRecord.id, null)!.withdrawPending], [[liveNow[0]], [liveNow[0]], 'needs-review', true])
+  setsBefore = calls.filter(c => c.op === 'SetSizeChart').length
+  const noUndo = await publish.publishChart(patient, store.chartById(teeRecord.id)!, ns, '2026-09-25 12:41:00')
+  check('  a check of the website now never puts it back', [calls.filter(c => c.op === 'SetSizeChart').length - setsBefore, noUndo.written, store2.get(liveNow[1] ?? liveNow[0]!)!.chart === null || liveNow.length === 1], [0, 0, true])
+  const fullOff = await publish.withdrawChart(patient, store.chartById(teeRecord.id)!, ns, '2026-09-25 12:45:00')
+  const offRecord = store.chartById(teeRecord.id)!
+  check('  tried again: nothing left on the website, the chart kept for a person to decide again', [fullOff.failed.length, [...store2.values()].filter(p => p.chart).length, offRecord.status, offRecord.reviewNote, offRecord.chartJson !== null, offRecord.publishedAt, offRecord.withdrawRequestedAt], [0, 0, 'needs-review', 'Taken off the website.', true, null, null])
+  check('  and the take-off is written as a take-off on the chart', [offRecord.reviewedBy, offRecord.reviewNote], ['shop', 'Taken off the website.'])
+
+  // Taking off an approved chart whose send is still waiting, with an older reading live.
+  store.approveChart(teeRecord.id, 'shop', null)
+  await publish.publishChart(patient, store.chartById(teeRecord.id)!, ns, '2026-09-25 12:50:00')
+  store.updateChart(teeRecord.id, { chartJson: JSON.stringify(tee2), status: 'approved' })
+  store.requestWithdraw(teeRecord.id, 'shop', '2026-09-25 12:51:00')
+  await publish.withdrawChart(patient, store.chartById(teeRecord.id)!, ns, '2026-09-25 12:52:00')
+  check('an approved chart taken off goes back to a person too, and no check sends it again', [store.chartById(teeRecord.id)!.status, publish.chartsToPublish({ includePublished: true }).some(r => r.id === teeRecord.id), [...store2.values()].filter(p => p.chart).length], ['needs-review', false, 0])
+  store.updateChart(teeRecord.id, { chartJson: JSON.stringify(tee) })
+
+  // A person acts while the chart is being sent: their decision wins.
+  store.approveChart(teeRecord.id, 'shop', null)
+  let skipDuring: unknown = null
+  faults.duringNextSet = () => {
+    skipDuring = store.skipChart(teeRecord.id, 'shop', null)
+  }
+  await publish.publishChart(patient, store.chartById(teeRecord.id)!, ns, '2026-09-25 13:00:00')
+  check('Skip while the chart is being sent waits (the app says so), and the send finishes', [(skipDuring as { ok: boolean }).ok, store.chartById(teeRecord.id)!.status], [false, 'published'])
+  store.requestWithdraw(teeRecord.id, 'shop')
+  await publish.withdrawChart(patient, store.chartById(teeRecord.id)!, ns)
+  store.approveChart(teeRecord.id, 'shop', null)
+  faults.duringNextSet = () => {
+    store.upsertSheetRows([{ rowNumber: 1, sourceProductId: '800000000001', productType: 'T-Shirts', store: 'MENS', imageUrl: 'https://x/tee-newer.png', sourceUrl: null, remark: null }], '2026-09-25 13:10:30')
+  }
+  const cut = await publish.publishChart(patient, store.chartById(teeRecord.id)!, ns, '2026-09-25 13:11:00')
+  const afterCut = store.chartRowById(teeRecord.id, null)!
+  check('a new picture from the sheet while a send runs: the send stops, the new picture keeps its place', [cut.interrupted, afterCut.status, store.chartById(teeRecord.id)!.imageUrl], [true, 'queued', 'https://x/tee-newer.png'])
+  check('  and what already reached Shopify is on the record, marked as older', [afterCut.live.length, afterCut.live.every(l => !l.current), [...store2.values()].filter(p => p.chart).length], [1, true, 1])
+  store.requestWithdraw(teeRecord.id, 'shop')
+  await publish.withdrawChart(patient, store.chartById(teeRecord.id)!, ns)
+  store.markRead(teeRecord.id, { read: clean, chart: tee, flags: [], notices: [], confidence: 1, autoApprove: false, model: 'm', tokensIn: 1, tokensOut: 1 })
+
+  // Shopify took the chart but the answer or the check got lost: the record still says it may be live.
+  store.approveChart(teeRecord.id, 'shop', null)
+  const firstLive = [...store2.values()].find(p => p.source === '800000000001')!
+  faults.failReadsFor = ''
+  faults.applyThenThrowFor = firstLive.id
+  const lostAnswer = await publish.publishChart(patient, store.chartById(teeRecord.id)!, ns, '2026-09-25 13:20:00')
+  check('a write whose answer was lost is looked at again, found, and recorded', [lostAnswer.written >= 1, store.chartRowById(teeRecord.id, null)!.live.some(l => l.productId === firstLive.id)], [true, true])
+  store.requestWithdraw(teeRecord.id, 'shop')
+  await publish.withdrawChart(patient, store.chartById(teeRecord.id)!, ns)
+  store.markRead(teeRecord.id, { read: clean, chart: tee, flags: [], notices: [], confidence: 1, autoApprove: false, model: 'm', tokensIn: 1, tokensOut: 1 })
+  store.approveChart(teeRecord.id, 'shop', null)
+  let readsSeen = 0
+  const realRequest = fake.request
+  fake.request = async (query, options) => {
+    // Let the first read of this product through, then fail every one after its write.
+    if (/ProductChartState/.test(query) && options?.variables?.id === firstLive.id && ++readsSeen >= 2) throw new Error('fetch failed')
+    return realRequest(query, options)
+  }
+  const unchecked = await publish.publishChart(patient, store.chartById(teeRecord.id)!, ns, '2026-09-25 13:30:00')
+  fake.request = realRequest
+  const uncheckedRow = store.chartRowById(teeRecord.id, null)!
+  check('the check after a write fails: the product is recorded as live anyway; it is "could not check", not "did not reach"', [firstLive.chart !== null, uncheckedRow.live.some(l => l.productId === firstLive.id), unchecked.failed.length, unchecked.unchecked.map(f => f.reason)], [true, true, 0, ['Shopify took the chart, but the app could not check it just now; the next check looks again']])
+  check('  so Skip still refuses and Take off still reaches it', store.skipChart(teeRecord.id, 'shop', null).ok, false)
+  check('  and the chart stays On the website, with a note saying what could not be checked', [uncheckedRow.status, uncheckedRow.live.filter(l => l.productId === firstLive.id).every(l => l.current), /^Could not check just now: /.test(uncheckedRow.error ?? '')], ['published', true, true])
+  await publish.publishChart(patient, store.chartById(teeRecord.id)!, ns, '2026-09-25 13:31:00')
+  check('  the next check looks again and clears the note', [store.chartById(teeRecord.id)!.status, store.chartById(teeRecord.id)!.error], ['published', null])
+  fake.request = async (query, options) => {
+    if (/ProductChartState/.test(query) && options?.variables?.id === firstLive.id) throw new Error('fetch failed')
+    return realRequest(query, options)
+  }
+  const blip = await publish.publishChart(patient, store.chartById(teeRecord.id)!, ns, '2026-09-25 13:32:00')
+  fake.request = realRequest
+  check('a routine check that cannot read a product showing this chart does not call the chart failed', [blip.failed.length, blip.unchecked.map(f => f.reason), store.chartById(teeRecord.id)!.status], [0, ['the app could not check it just now; it still shows this chart, and the next check looks again'], 'published'])
+  await publish.publishChart(patient, store.chartById(teeRecord.id)!, ns, '2026-09-25 13:33:00')
+  store.requestWithdraw(teeRecord.id, 'shop')
+  await publish.withdrawChart(patient, store.chartById(teeRecord.id)!, ns)
+
+  // The jobs: one publish run end to end, a crash written on the chart, and a request while busy waits its turn.
+  store.approveChart(teeRecord.id, 'shop', null)
+  const publishJob = jobs.startPublishJob(fake, { chartIds: [teeRecord.id] }, { sleep: noSleep })
+  for (let waited = 0; waited < 100 && jobs.sizeChartJobById(publishJob.jobId!)?.status === 'running'; waited++) await new Promise(resolve => setTimeout(resolve, 10))
+  check('the publish job: started, finished, chart live', [publishJob.started, jobs.sizeChartJobById(publishJob.jobId!)?.status, store.chartById(teeRecord.id)!.status], [true, 'done', 'published'])
+  check('nothing to send: the job says so instead of starting', jobs.startPublishJob(fake, { chartIds: [lonely.id + 1000] }).reason, 'No approved charts are waiting to go to the website.')
+
+  store.requestWithdraw(teeRecord.id, 'shop')
+  await publish.withdrawChart(patient, store.chartById(teeRecord.id)!, ns)
+  store.approveChart(teeRecord.id, 'shop', null)
+  faults.definitionDown = true
+  definitions.length = 0
+  const crashJob = jobs.startPublishJob(fake, { chartIds: [teeRecord.id] }, { sleep: noSleep })
+  for (let waited = 0; waited < 100 && jobs.sizeChartJobById(crashJob.jobId!)?.status === 'running'; waited++) await new Promise(resolve => setTimeout(resolve, 10))
+  faults.definitionDown = false
+  check('a send that cannot even start writes why on the chart itself, not only on the job line', [jobs.sizeChartJobById(crashJob.jobId!)?.status, store.chartById(teeRecord.id)!.status, /^It did not go to the website: Shopify is not answering/.test(store.chartById(teeRecord.id)!.error ?? '')], ['failed', 'publish-failed', true])
+  await publish.ensureChartDefinition(patient)
+
+  store.requestWithdraw(teeRecord.id, 'shop')
+  let releaseBusy: () => void = () => {}
+  const hold = new Promise<void>((resolve) => {
+    releaseBusy = resolve
+  })
+  const busyJob = jobs.launchSizeChartJob('read', 1, async () => {
+    await hold
+  })
+  let ranAfter = 0
+  const waited = jobs.whenIdle(() => {
+    ranAfter++
+    return jobs.startWithdrawJob(fake, teeRecord.id, { sleep: noSleep })
+  })
+  check('a job asked for while another runs waits, and does not run yet', [busyJob.started, waited, ranAfter], [true, true, 0])
+  releaseBusy()
+  for (let i = 0; i < 100 && (ranAfter === 0 || jobs.latestSizeChartJob('withdraw')?.status === 'running'); i++) await new Promise(resolve => setTimeout(resolve, 10))
+  check('  it starts by itself once the running job ends, and does its work', [ranAfter, jobs.latestSizeChartJob('withdraw')?.status, store.chartById(teeRecord.id)!.withdrawRequestedAt, [...store2.values()].filter(p => p.chart).length], [1, 'done', null, 0])
+
+  // After a restart: what was promised is picked up from the charts themselves.
+  const { resumeSizeChartWork, storeToResume } = await import('../server/utils/size-chart-resume')
+  check('no installed store: nothing is picked up', storeToResume({ allowedShops: 'tudoholic-com.myshopify.com' }), null)
+  const { saveShopSession } = await import('../server/utils/shop-tokens')
+  saveShopSession({ shop: 'tudoholic-com.myshopify.com', accessToken: 'token', scope: 'read_products', expires: undefined, refreshToken: undefined, refreshTokenExpires: undefined })
+  saveShopSession({ shop: 'logx-ivsveium.myshopify.com', accessToken: 'token', scope: 'read_products', expires: undefined, refreshToken: undefined, refreshTokenExpires: undefined })
+  check('only the store ALLOWED_SHOPS names is picked up, never the test store', [storeToResume({ allowedShops: 'tudoholic-com.myshopify.com' }), storeToResume({ allowedShops: '' })], ['tudoholic-com.myshopify.com', null])
+  store.approveChart(teeRecord.id, 'shop', null)
+  await publish.publishChart(patient, store.chartById(teeRecord.id)!, ns)
+  store.requestWithdraw(teeRecord.id, 'shop')
+  store.approveChart(lonely.id, 'shop', null)
+  const resumed = resumeSizeChartWork({ clientFor: async () => fake, allowedShops: 'tudoholic-com.myshopify.com' })
+  for (let i = 0; i < 200 && (store.chartById(teeRecord.id)!.withdrawRequestedAt !== null || jobs.latestSizeChartJob()?.status === 'running'); i++) await new Promise(resolve => setTimeout(resolve, 10))
+  check('an unfinished take-off and the approved charts are started again by themselves', [resumed.withdraws, resumed.publish, store.chartById(teeRecord.id)!.withdrawRequestedAt, [...store2.values()].filter(p => p.chart).length], [1, true, null, 0])
+
+  // Second review: leftover take-offs, retries, the chart's own reasons, the daily clock.
+  store.approveChart(teeRecord.id, 'shop', null)
+  await publish.publishChart(patient, store.chartById(teeRecord.id)!, ns)
+  check('a leftover take-off with no open request is dropped, never run over a chart approved again', [jobs.startWithdrawJob(fake, teeRecord.id).reason, await publish.withdrawChart(patient, store.chartById(teeRecord.id)!, ns).then(o => o.removed), [...store2.values()].filter(p => p.chart).length > 0], ['Nothing is waiting to be taken off.', 0, true])
+  store.requestWithdraw(teeRecord.id, 'shop')
+  await publish.withdrawChart(patient, store.chartById(teeRecord.id)!, ns)
+
+  store.updateChart(teeRecord.id, { status: 'published' })
+  store.requestWithdraw(teeRecord.id, 'shop')
+  check('pressing Take off again while a take-off is still open is a retry, always allowed', store.requestWithdraw(teeRecord.id, 'shop'), { ok: true })
+  const closeJob = jobs.startWithdrawJob(fake, teeRecord.id, { sleep: noSleep })
+  for (let i = 0; i < 100 && jobs.sizeChartJobById(closeJob.jobId!)?.status === 'running'; i++) await new Promise(resolve => setTimeout(resolve, 10))
+  mark = calls.length
+  check('  a take-off with nothing on record closes without asking Shopify, and the chart can be approved again', [jobs.sizeChartJobById(closeJob.jobId!)?.status, store.chartById(teeRecord.id)!.withdrawRequestedAt, store.approveChart(teeRecord.id, 'shop', null).ok], ['done', null, true])
+
+  // The chart's own reason stays when its older reading cannot be checked.
+  await publish.publishChart(patient, store.chartById(teeRecord.id)!, ns)
+  const olderProduct = store.chartRowById(teeRecord.id, null)!.live[0]!.productId
+  store.updateChart(teeRecord.id, { status: 'image-failed', chartJson: null, error: '1688 answered 403' })
+  fake.request = async (query, options) => {
+    if (/ProductChartState/.test(query) && options?.variables?.id === olderProduct) throw new Error('fetch failed')
+    return realRequest(query, options)
+  }
+  await publish.publishChart(patient, store.chartById(teeRecord.id)!, ns)
+  fake.request = realRequest
+  check('a check of an older chart that cannot read a product keeps the chart\'s own reason', store.chartById(teeRecord.id)!.error, '1688 answered 403')
+  store.updateChart(teeRecord.id, { status: 'needs-review', error: null, chartJson: JSON.stringify(tee2) })
+  fake.request = async (query, options) => {
+    if (/ProductChartState/.test(query) && options?.variables?.id === olderProduct) throw new Error('fetch failed')
+    return realRequest(query, options)
+  }
+  await publish.publishChart(patient, store.chartById(teeRecord.id)!, ns)
+  fake.request = realRequest
+  const checkNote = store.chartById(teeRecord.id)!.error ?? ''
+  await publish.publishChart(patient, store.chartById(teeRecord.id)!, ns)
+  check('  its own "could not be checked" note is cleared by the next check that works', [/^The older chart still on the website could not be checked/.test(checkNote), store.chartById(teeRecord.id)!.error], [true, null])
+  store.updateChart(teeRecord.id, { chartJson: JSON.stringify(tee) })
+  store.requestWithdraw(teeRecord.id, 'shop')
+  await publish.withdrawChart(patient, store.chartById(teeRecord.id)!, ns)
+
+  // Why a send did not happen is written on the chart, whatever its status was.
+  store.updateChart(teeRecord.id, { status: 'publish-failed', error: 'Value is invalid JSON' })
+  jobs.recordSendFailure([teeRecord.id], new Error('Shopify is not answering'))
+  check('a send that could not start: a failed chart gets the new reason (so its window stops waiting)', [store.chartById(teeRecord.id)!.status, store.chartById(teeRecord.id)!.error], ['publish-failed', 'It did not go to the website: Shopify is not answering'])
+  store.updateChart(teeRecord.id, { status: 'published', error: null })
+  jobs.recordSendFailure([teeRecord.id], new Error('x'))
+  check('  a chart on the website is left alone (it is still there)', [store.chartById(teeRecord.id)!.status, store.chartById(teeRecord.id)!.error], ['published', null])
+  store.updateChart(teeRecord.id, { status: 'needs-review' })
+
+  let reported: unknown = null
+  const blocker = jobs.launchSizeChartJob('read', 1, async () => {
+    await new Promise(resolve => setTimeout(resolve, 30))
+  })
+  jobs.whenIdle(() => {
+    throw new Error('the token has run out')
+  }, (error) => {
+    reported = error
+  })
+  for (let i = 0; i < 100 && (reported === null || jobs.sizeChartJobById(blocker.jobId!)?.status === 'running'); i++) await new Promise(resolve => setTimeout(resolve, 10))
+  check('a waiting job that cannot start says why to whoever asked for it', (reported as Error | null)?.message, 'the token has run out')
+
+  // The daily clock survives restarts; start-up closes what a dead process left running.
+  const { recheckDue } = await import('../server/utils/size-chart-resume')
+  settings.setSetting(settings.SETTING_SIZE_CHARTS_LAST_RECHECK, '2026-09-24 10:00:00')
+  check('the daily check is due when the last one is a day old, not before', [recheckDue(Date.parse('2026-09-25T09:59:00Z')), recheckDue(Date.parse('2026-09-25T10:00:00Z'))], [false, true])
+  resumeSizeChartWork({ clientFor: async () => fake, allowedShops: 'tudoholic-com.myshopify.com' }, { recheck: true, nowMs: Date.parse('2026-09-25T10:00:00Z') })
+  check('  a check queued now moves the clock, stored in the database (a restart does not reset it)', settings.getSetting(settings.SETTING_SIZE_CHARTS_LAST_RECHECK), '2026-09-25 10:00:00')
+  for (let i = 0; i < 200 && jobs.latestSizeChartJob()?.status === 'running'; i++) await new Promise(resolve => setTimeout(resolve, 10))
+  const { useDb } = await import('../server/utils/db')
+  const schema = await import('../server/db/schema')
+  useDb().insert(schema.sizeChartJobs).values({ kind: 'publish', status: 'running', total: 5, done: 2, failed: 0, startedAt: '2026-09-25 09:00:00', createdAt: '2026-09-25 09:00:00' }).run()
+  check('start-up closes a job row a dead process left running', [jobs.closeJobsLeftByRestart(), jobs.latestSizeChartJob()?.status, jobs.latestSizeChartJob()?.error], [1, 'failed', 'the app restarted while this job was running; the next job continues from where it stopped'])
+  check('the chart row says when Shopify is being told about it right now', [store.chartRowById(teeRecord.id, null)!.inFlight], [false])
+
+  // What App Bridge says about the box, in Shopify's documented shapes.
+  const { boxStateFrom } = await import('../shared/size-chart/box-state')
+  check('the box check: placed on the live theme', boxStateFrom([{ handle: 'size-chart', type: 'theme_app_extension', activations: [{ handle: 'size-chart', name: 'Size chart', status: 'active', activations: [{ target: 'template--product/main', themeId: '1' }] }] }]), 'on')
+  check('  deployed but not placed yet: missing (the entry is listed either way)', boxStateFrom([{ handle: 'size-chart', type: 'theme_app_extension', activations: [{ handle: 'size-chart', name: 'Size chart', status: 'available', activations: [] }] }]), 'missing')
+  check('  switched off: missing', boxStateFrom([{ handle: 'size-chart', activations: [{ handle: 'size-chart', status: 'unavailable' }] }]), 'missing')
+  check('  an answer in any other shape: cannot tell, never "on"', [boxStateFrom(null), boxStateFrom([]), boxStateFrom([{ handle: 'size-chart', status: 'active', activations: [] }]), boxStateFrom([{ handle: 'size-chart', activations: [{ handle: 'other', status: 'active' }] }])], ['unknown', 'unknown', 'unknown', 'unknown'])
+
+  // The box on the product page and how to add it.
+  check('the theme editor link is Shopify\'s documented deep link to the main product section', theme.themeEditorLink('0f8e54d5b874a56aeda52d19d0a5006a'), 'shopify://admin/themes/current/editor?template=product&addAppBlockId=0f8e54d5b874a56aeda52d19d0a5006a/size-chart&target=mainSection')
+  check('  and no link without a real app key', theme.themeEditorLink(''), null)
+}
+
+// ---------------------------------------------------------------------------
+section('The Size chart box (theme app extension)')
+
+{
+  const { existsSync, readdirSync, readFileSync, statSync } = await import('node:fs')
+  const root = join(repo, 'extensions/size-chart')
+  const toml = readFileSync(join(root, 'shopify.extension.toml'), 'utf8')
+  check('the extension keeps the identity Shopify knows it by (name, handle, type, uid)', [/^name = "size-chart"$/m.test(toml), /^handle = "size-chart"$/m.test(toml), /^type = "theme"$/m.test(toml), /^uid = "67f039ac-feb8-48a5-b1cb-872e0ef32a2d3888ed2a"$/m.test(toml)], [true, true, true, true])
+  const allowed: Record<string, RegExp> = { blocks: /\.liquid$/, snippets: /\.liquid$/, locales: /\.json$/, assets: /\.(css|js|png|svg|jpg|json)$/ }
+  const strays = readdirSync(root).flatMap((name) => {
+    const path = join(root, name)
+    if (!statSync(path).isDirectory()) return name === 'shopify.extension.toml' ? [] : [name]
+    if (!allowed[name]) return [`${name}/`]
+    return readdirSync(path).filter(file => statSync(join(path, file)).isDirectory() || !allowed[name]!.test(file)).map(file => `${name}/${file}`)
+  })
+  check('  only the folders and file types Shopify accepts, no subfolders', strays, [])
+  const block = readFileSync(join(root, `blocks/${theme.SIZE_CHART_BLOCK_HANDLE}.liquid`), 'utf8')
+  const schemaText = /\{% schema %\}([\s\S]*?)\{% endschema %\}/.exec(block)?.[1] ?? ''
+  let schema: { name?: string, target?: string, stylesheet?: string, enabled_on?: { templates?: string[] }, settings?: { type: string, id: string, autofill?: boolean, default?: unknown }[] } = {}
+  try {
+    schema = JSON.parse(schemaText)
+  }
+  catch {
+    schema = {}
+  }
+  check('the block\'s schema is strict JSON with a short name, a section target and the product page only', [schema.name, (schema.name ?? '').length < 25, schema.target, schema.enabled_on?.templates], ['Size chart', true, 'section', ['product']])
+  check('  its stylesheet exists', existsSync(join(root, 'assets', schema.stylesheet ?? '-')), true)
+  check('  the product setting fills itself in', schema.settings?.find(setting => setting.id === 'product'), { type: 'product', id: 'product', label: 'Product', autofill: true, info: 'Fills itself in on product pages. Leave it as it is.' })
+  check('  Kiwi Sizing is hidden by default on products with our chart, and the switch exists', schema.settings?.find(setting => setting.id === 'hide_kiwi')?.default, true)
+  check('the block reads exactly the field the app writes', block.includes(`metafields['${storefront.CHART_METAFIELD_NAMESPACE}'].${storefront.CHART_METAFIELD_KEY}.value`), true)
+  check('  the page\'s own product comes first; the picked one only where the page has none', /assign chart_product = product\s+assign other_product = false\s+if chart_product == blank\s+assign chart_product = block\.settings\.product/.test(block), true)
+  check('  in a section that shows another product, it shows nothing', /elsif block\.settings\.product != blank and block\.settings\.product\.id != product\.id\s+assign other_product = true/.test(block) && /unless other_product\s+assign chart = chart_product/.test(block), true)
+  const css = readFileSync(join(root, 'assets/size-chart.css'), 'utf8')
+  check('  the theme\'s own cell borders are cleared, so no sideways scrollbar under a chart that fits', /\.tsc th,\s*\.tsc td \{[^}]*border: 0;\s*border-bottom: 1px solid/.test(css), true)
+  check('  the size is printed from "label", never from Liquid\'s "size"', [block.includes('row.label'), /row\.size|row\['size'\]/.test(block)], [true, false])
+  const printed = [...block.replace(/\{% schema %\}[\s\S]*$/, '').matchAll(/\{\{-?\s*([^}]*?)\s*-?\}\}/g)].map(match => match[1]!)
+  const unescaped = printed.filter(expression => !/\|\s*escape\b/.test(expression) && !/^block\.(id|shopify_attributes)$/.test(expression))
+  check('  every text it prints is escaped', unescaped, [])
+  check('  inches first, cm by the switch, with no JavaScript', [/id="tsc-in-\{\{ block\.id \}\}" checked/.test(block), !/<script/i.test(block.replace(/\{%- comment -%\}[\s\S]*?\{%- endcomment -%\}/, ''))], [true, true])
+}
 
 // ---------------------------------------------------------------------------
 section('No size chart route answers without a Shopify login')

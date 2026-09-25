@@ -25,6 +25,13 @@ export const SETTING_SIZE_CHARTS_AUTO_APPROVE = 'sizeCharts.autoApprove'
 export const SETTING_SIZE_CHARTS_AUTO_READ = 'sizeCharts.autoRead'
 
 /**
+ * When the last full check of every chart on the website was queued, as a
+ * column time. Kept here, not in memory, so a restart does not reset the
+ * daily clock (an app deployed every day would otherwise never check).
+ */
+export const SETTING_SIZE_CHARTS_LAST_RECHECK = 'sizeCharts.lastRecheckAt'
+
+/**
  * A switch's value, or null when it has never been set.
  *
  * Never throws. A missing ROW has always meant "the default"; a settings table

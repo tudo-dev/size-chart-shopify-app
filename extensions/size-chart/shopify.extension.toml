@@ -1,0 +1,7 @@
+# Tudoholic Size Charts: the "Size chart" box for the product page.
+# Never change uid, handle or name: Shopify knows the extension by them, and
+# a change would remove the box from every theme it was added to.
+name = "size-chart"
+handle = "size-chart"
+type = "theme"
+uid = "67f039ac-feb8-48a5-b1cb-872e0ef32a2d3888ed2a"

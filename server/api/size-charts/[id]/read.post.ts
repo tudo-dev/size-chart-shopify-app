@@ -7,7 +7,7 @@
 
 import { getVerifiedShopUrl } from '../../../utils/shopify'
 import { chartById, chartRowById, requeueChart } from '../../../utils/size-chart-store'
-import { startReadJob } from '../../../utils/size-chart-jobs'
+import { startReadJob, whenIdle } from '../../../utils/size-chart-jobs'
 
 export default defineEventHandler(async (event) => {
   try {
@@ -24,6 +24,11 @@ export default defineEventHandler(async (event) => {
     if (!record.imagePath) return { success: false, error: 'The picture has not been fetched yet. Press Sync products to fetch the missing pictures first.' }
     const job = startReadJob({ sourceIds: [record.sourceProductId] })
     const row = chartRowById(id, shop.replace(/\.myshopify\.com$/i, ''))
+    if (!job.started && job.alreadyRunning) {
+      // Another job is running: the reading starts by itself when it ends.
+      whenIdle(() => startReadJob({ sourceIds: [record.sourceProductId] }))
+      return { success: true, queued: true, job, row }
+    }
     if (!job.started && job.reason) return { success: false, error: job.reason, row }
     return { success: true, job, row }
   }

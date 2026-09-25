@@ -5,12 +5,16 @@
  * `intake` runs after every upload: tie the sheet's 1688 ids to Shopify
  * products (by handle when the workbook had the export tab, by walking the
  * catalogue when a product is still unknown), then fetch every picture the
- * app has not got yet. Reading and publishing are their own jobs.
+ * app has not got yet. Reading, publishing (`publish`) and taking a chart
+ * off the website (`withdraw`) are their own jobs.
+ *
+ * A job asked for while another runs is not lost: `whenIdle` keeps it and
+ * starts it the moment the running one ends, crash or not.
  */
 
 import { readFileSync } from 'node:fs'
 import type { GraphqlClient } from '@shopify/shopify-api'
-import { desc, eq } from 'drizzle-orm'
+import { and, desc, eq, ne } from 'drizzle-orm'
 import pLimit from 'p-limit'
 import * as tables from '../db/schema'
 import { useDb } from './db'
@@ -21,9 +25,13 @@ import { fetchImage, imageKindOf, mediaTypeOf } from './size-chart-images'
 import { dropProductSourcesOlderThan, productsForSources, sizesSoldOf, syncAllProductSources, syncProductsByHandle } from './size-chart-products'
 import { readerConfigFromEnv, readSizeChartImage } from './size-chart-reader'
 import type { ReaderConfig, ReadInput, ReadResult } from './size-chart-reader'
-import { chartsWithStatus, markFailed, markImageFetched, markRead, parseRead, readForImage, unmatchedSourceIds, updateChart } from './size-chart-store'
+import { chartById, chartsWithStatus, markFailed, markImageFetched, markRead, parseRead, readForImage, unmatchedSourceIds, updateChart } from './size-chart-store'
+import type { ChartStatus } from './size-chart-store'
+import { chartsToPublish, ensureChartDefinition, patientClient, publishChart, withdrawChart } from './size-chart-publish'
+import type { GraphqlRequester } from './size-chart-publish'
+import { publicationsForCharts } from './size-chart-publications'
 
-export type JobKind = 'intake' | 'read' | 'publish'
+export type JobKind = 'intake' | 'read' | 'publish' | 'withdraw'
 
 export interface JobHandle {
   id: number
@@ -43,6 +51,100 @@ const IMAGE_CONCURRENCY = 3
 const READ_CONCURRENCY = 2
 
 let running: number | null = null
+
+/** Jobs asked for while another ran, oldest first, each with what to do if it cannot start. */
+interface Waiting { start: () => Promise<unknown> | unknown, onFail?: (error: unknown) => void }
+const waiting: Waiting[] = []
+let draining = false
+
+function busy(): boolean {
+  return running !== null && sizeChartJobById(running)?.status === 'running'
+}
+
+/**
+ * Start what is waiting, one at a time: each start makes the app busy
+ * again, and the next waits for that job to end. A start that found another
+ * job had slipped in first goes back to the front of the line.
+ */
+async function drainWaiting(): Promise<void> {
+  if (draining) return
+  draining = true
+  try {
+    while (waiting.length > 0 && !busy()) {
+      const next = waiting.shift()!
+      try {
+        const result = await next.start() as StartJobResult | undefined
+        if (result && !result.started && result.alreadyRunning !== undefined) {
+          waiting.unshift(next)
+          break
+        }
+      }
+      catch (error) {
+        console.error('[Size charts] a job that was waiting could not start:', error)
+        // Said where the person looks: on the chart it was for.
+        try {
+          next.onFail?.(error)
+        }
+        catch (reportError) {
+          console.error('[Size charts] could not record why a waiting job did not start:', reportError)
+        }
+      }
+    }
+  }
+  finally {
+    draining = false
+  }
+}
+
+/**
+ * Run `start` now if no job is running, or as soon as the running one ends.
+ * Returns true when it had to wait.
+ */
+export function whenIdle(start: () => Promise<unknown> | unknown, onFail?: (error: unknown) => void): boolean {
+  if (!busy()) {
+    running = null
+    waiting.push({ start, onFail })
+    void drainWaiting()
+    return false
+  }
+  waiting.push({ start, onFail })
+  return true
+}
+
+const RESTARTED = 'the app restarted while this job was running; the next job continues from where it stopped'
+
+/**
+ * A job row left "running" by a process that is gone (a deploy, a crash) is
+ * closed at start-up, so the page stops showing it as running and every
+ * button works again. Never the job this process is running now.
+ */
+export function closeJobsLeftByRestart(): number {
+  const where = running === null
+    ? eq(tables.sizeChartJobs.status, 'running')
+    : and(eq(tables.sizeChartJobs.status, 'running'), ne(tables.sizeChartJobs.id, running))!
+  return useDb().update(tables.sizeChartJobs)
+    .set({ status: 'failed', error: RESTARTED, finishedAt: nowColumnText() })
+    .where(where).run().changes
+}
+
+/**
+ * Write why a send did not happen on the charts it was for, so each chart's
+ * own window says so. An approved chart becomes "did not reach"; one that had
+ * already failed keeps its status and gets the new reason. A chart already
+ * on the website is left alone: it is still there, and the job line says
+ * why the check stopped. With no ids (a queued "send everything" that never
+ * started), every chart the send would have taken.
+ */
+export function recordSendFailure(chartIds: readonly number[] | undefined, error: unknown): void {
+  const why = `It did not go to the website: ${error instanceof Error ? error.message : String(error)}`.slice(0, 1000)
+  const ids = chartIds && chartIds.length > 0 ? chartIds : chartsToPublish().map(record => record.id)
+  for (const id of new Set(ids)) {
+    const record = chartById(id)
+    if (!record || record.withdrawRequestedAt) continue
+    if (record.status === 'approved') updateChart(id, { status: 'publish-failed', error: why })
+    else if (record.status === 'publish-failed') updateChart(id, { error: why })
+  }
+}
 
 export function sizeChartJobById(id: number) {
   return useDb().select().from(tables.sizeChartJobs).where(eq(tables.sizeChartJobs.id, id)).get() ?? null
@@ -72,7 +174,7 @@ export function launchSizeChartJob(kind: JobKind, total: number, work: (job: Job
   // A job left `running` by a restart is finished for it: its work is on the
   // rows already, and the next job picks up whatever is still queued.
   db.update(tables.sizeChartJobs)
-    .set({ status: 'failed', error: 'the app restarted while this job was running; the next job continues from where it stopped', finishedAt: now })
+    .set({ status: 'failed', error: RESTARTED, finishedAt: now })
     .where(eq(tables.sizeChartJobs.status, 'running'))
     .run()
 
@@ -114,13 +216,16 @@ export function launchSizeChartJob(kind: JobKind, total: number, work: (job: Job
     })
     .finally(() => {
       running = null
-      if (crashed || !then) return
-      try {
-        then()
+      if (!crashed && then) {
+        try {
+          then()
+        }
+        catch (error) {
+          console.error(`[Size charts] the follow-up after the ${kind} job could not start:`, error)
+        }
       }
-      catch (error) {
-        console.error(`[Size charts] the follow-up after the ${kind} job could not start:`, error)
-      }
+      // A follow-up may have started a job; whatever waits then waits for that.
+      void drainWaiting()
     })
 
   return { jobId: job.id, started: true }
@@ -137,6 +242,8 @@ export interface IntakeInput {
   retryFailed?: boolean
   /** Start reading the fetched pictures as soon as the intake ends (when the reader has a key). */
   thenRead?: boolean
+  /** Only fetch the pictures; never walk the catalogue (the start-up pick-up must not take 18 minutes). */
+  skipScan?: boolean
 }
 
 /** Tie sheet rows to products and fetch the pictures. Returns at once with the job id. */
@@ -157,7 +264,7 @@ export function startIntakeJob(client: GraphqlClient, input: IntakeInput = {}): 
     }
 
     const stillUnmatched = unmatchedSourceIds()
-    const needScan = input.fullSync || stillUnmatched.length > 0
+    const needScan = !input.skipScan && (input.fullSync || stillUnmatched.length > 0)
     if (needScan) {
       job.progress({ note: 'Reading the product list from Shopify…' })
       const result = await syncAllProductSources(client, {
@@ -286,5 +393,90 @@ export function startReadJob(input: ReadJobInput = {}, deps: ReadJobDeps = {}): 
         job.progress({ done, failed })
       }
     })))
+  })
+}
+
+export interface PublishJobInput {
+  /** Only these charts; absent means every chart the run takes. */
+  chartIds?: readonly number[]
+  /** Also look again at charts already on the website, so products added since get them and products that changed lose them. */
+  includePublished?: boolean
+}
+
+const SENDABLE: readonly ChartStatus[] = ['approved', 'publish-failed', 'published']
+
+/**
+ * Put approved charts on their products in Shopify, one product at a time.
+ * Each chart is taken fresh from the database as its turn comes, so a
+ * person's later decision (a Skip, a new picture) always wins.
+ */
+export function startPublishJob(client: GraphqlRequester, input: PublishJobInput = {}, deps: { sleep?: (ms: number) => Promise<void> } = {}): StartJobResult {
+  const planned = chartsToPublish(input)
+  if (planned.length === 0) {
+    return { jobId: null, started: false, reason: 'No approved charts are waiting to go to the website.' }
+  }
+  const patient = patientClient(client, deps.sleep)
+  return launchSizeChartJob('publish', planned.length, async (job) => {
+    try {
+      job.progress({ note: 'Getting the size chart field ready in Shopify…' })
+      const namespace = await ensureChartDefinition(patient)
+      let done = 0
+      let failed = 0
+      for (const snapshot of planned) {
+        const record = chartById(snapshot.id)
+        const stillLive = record ? (publicationsForCharts([record.id]).get(record.id) ?? []).length > 0 : false
+        if (record && !record.withdrawRequestedAt && (SENDABLE.includes(record.status as ChartStatus) || stillLive)) {
+          job.progress({ note: `Sending chart ${done + 1} of ${planned.length} to the website…` })
+          // A chart that does not read back stops the whole run (ReadBackError):
+          // the job is marked failed with the reason, nothing more is sent.
+          const outcome = await publishChart(patient, record, namespace)
+          if (outcome.status === 'publish-failed') failed++
+        }
+        done++
+        job.progress({ done, failed })
+      }
+    }
+    catch (error) {
+      // Written on the charts themselves too, so the chart's own window says
+      // why, not only the line under "Where every chart stands".
+      recordSendFailure(planned.map(record => record.id), error)
+      throw error
+    }
+  })
+}
+
+/**
+ * Take one chart off every product that shows it. Call requestWithdraw
+ * first: that is what stops every send and survives a restart.
+ */
+export function startWithdrawJob(client: GraphqlRequester, chartId: number, deps: { sleep?: (ms: number) => Promise<void> } = {}): StartJobResult {
+  const record = chartById(chartId)
+  if (!record) return { jobId: null, started: false, reason: 'That chart is not in the list any more.' }
+  // A leftover request (pressed twice, or already done) is dropped, never run
+  // again over a chart a person has approved since.
+  if (!record.withdrawRequestedAt) return { jobId: null, started: false, reason: 'Nothing is waiting to be taken off.' }
+  const live = publicationsForCharts([chartId]).get(chartId) ?? []
+  const patient = patientClient(client, deps.sleep)
+  return launchSizeChartJob('withdraw', Math.max(live.length, 1), async (job) => {
+    try {
+      job.progress({ note: `Taking the chart off ${live.length} ${live.length === 1 ? 'product' : 'products'}…` })
+      const fresh = chartById(chartId)
+      if (!fresh || !fresh.withdrawRequestedAt) return
+      // Nothing on record any more: close the request without asking Shopify.
+      // Safe: this runs only while no other job does, so no send is saving a row.
+      if ((publicationsForCharts([chartId]).get(chartId) ?? []).length === 0) {
+        updateChart(chartId, { withdrawRequestedAt: null, publishedAt: null, publishedSha256: null, error: null })
+        job.progress({ done: 1, failed: 0 })
+        return
+      }
+      const namespace = await ensureChartDefinition(patient)
+      const outcome = await withdrawChart(patient, fresh, namespace)
+      job.progress({ done: Math.max(live.length, 1), failed: outcome.failed.length })
+    }
+    catch (error) {
+      const why = error instanceof Error ? error.message : String(error)
+      updateChart(chartId, { error: `It could not be taken off the website: ${why}. Press Take off the website again.`.slice(0, 1000) })
+      throw error
+    }
   })
 }

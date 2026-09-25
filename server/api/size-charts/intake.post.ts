@@ -9,7 +9,8 @@
 
 import { getAccessToken } from '../../utils/shopify'
 import { createShopifyClientFromToken } from '../../utils/shopify-client-from-token'
-import { startIntakeJob } from '../../utils/size-chart-jobs'
+import { clientForShop } from '../../utils/shop-tokens'
+import { startIntakeJob, startPublishJob, whenIdle } from '../../utils/size-chart-jobs'
 
 export default defineEventHandler(async (event) => {
   try {
@@ -20,6 +21,11 @@ export default defineEventHandler(async (event) => {
     // Deliberately NOT thenRead: reading costs money, so it stays a separate
     // press. On 2026-09-20 a Sync products read all 84 pictures by surprise.
     const job = startIntakeJob(client, { fullSync: body?.full === true, retryFailed: true })
+    // Once the product list is fresh, charts already on the website reach
+    // products added since, and leave products that no longer carry their
+    // 1688 id. Nothing new is approved by this: only approved charts move.
+    const shop = session.shop
+    whenIdle(async () => startPublishJob(await clientForShop(shop), { includePublished: true }))
     return { success: true, job }
   }
   catch (error) {

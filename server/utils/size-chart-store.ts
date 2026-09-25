@@ -13,6 +13,9 @@ import { chartSummary, sizesOf } from '../../shared/size-chart/chart'
 import type { PublishedChart, ReadChart } from '../../shared/size-chart/chart'
 import { productsForSources } from './size-chart-products'
 import type { ProductSource } from './size-chart-products'
+import { isInFlight, publicationsForCharts } from './size-chart-publications'
+import type { PublicationRecord } from './size-chart-publications'
+import { storefrontProblems, storefrontValue } from '../../shared/size-chart/storefront'
 import { likePattern } from './list-query'
 
 export const CHART_STATUSES = ['no-image', 'queued', 'image-failed', 'read-failed', 'needs-review', 'approved', 'publish-failed', 'published', 'skipped'] as const
@@ -42,6 +45,20 @@ export interface ChartProduct {
   adminUrl: string | null
 }
 
+/** A product that shows this chart on the website right now. */
+export interface ChartLive {
+  productId: string
+  title: string
+  /** The product's page on the website; null when the product is not on the Online Store. */
+  url: string | null
+  adminUrl: string | null
+  publishedAt: string
+  /** Set when the product uses its own product-page layout, where the Size chart box must be added too. */
+  templateSuffix: string | null
+  /** False when what is live is an older reading of this chart (a new picture came in since). */
+  current: boolean
+}
+
 export interface ChartRow {
   id: number
   sourceProductId: string
@@ -59,6 +76,12 @@ export interface ChartRow {
   summary: string | null
   sizes: string[]
   products: ChartProduct[]
+  /** The products showing this chart on the website now. */
+  live: ChartLive[]
+  /** A person asked for it to be taken off the website and that is not finished yet. */
+  withdrawPending: boolean
+  /** Shopify is being told about this chart this very moment (a send or a take-off). */
+  inFlight: boolean
   error: string | null
   readAt: string | null
   reviewedAt: string | null
@@ -236,8 +259,12 @@ function searchClause(q: string): SQL | null {
                  and (p.title like ${pattern} escape '\\' or p.handle like ${pattern} escape '\\')))`
 }
 
-function toRow(record: ChartRecord, products: readonly ProductSource[], shopHandle: string | null): ChartRow {
+function toRow(record: ChartRecord, products: readonly ProductSource[], publications: readonly PublicationRecord[], shopHandle: string | null): ChartRow {
   const chart = parseChart(record.chartJson)
+  // What is live counts as this chart when it is exactly this reading, as
+  // the website got it — whatever the status says (a send that reached some
+  // products and not others is still this chart on those products).
+  const readingSha = chart && storefrontProblems(chart).length === 0 ? storefrontValue(chart).sha256 : null
   return {
     id: record.id,
     sourceProductId: record.sourceProductId,
@@ -261,6 +288,17 @@ function toRow(record: ChartRecord, products: readonly ProductSource[], shopHand
       status: product.status,
       adminUrl: adminProductUrl(shopHandle, product.shopifyProductId),
     })),
+    live: publications.map(publication => ({
+      productId: publication.shopifyProductId,
+      title: publication.title ?? publication.handle ?? publication.shopifyProductId,
+      url: publication.onlineStoreUrl,
+      adminUrl: adminProductUrl(shopHandle, publication.shopifyProductId),
+      publishedAt: publication.publishedAt,
+      templateSuffix: publication.templateSuffix,
+      current: readingSha !== null && publication.chartSha256 === readingSha,
+    })),
+    withdrawPending: record.withdrawRequestedAt !== null,
+    inFlight: isInFlight(record.id),
     error: record.error,
     readAt: record.readAt,
     reviewedAt: record.reviewedAt,
@@ -290,8 +328,9 @@ export function listCharts(input: ListInput): { rows: ChartRow[], total: number,
     .limit(input.size).offset((input.page - 1) * input.size)
     .all()
   const products = productsForSources(records.map(record => record.sourceProductId))
+  const publications = publicationsForCharts(records.map(record => record.id))
   return {
-    rows: records.map(record => toRow(record, products.get(record.sourceProductId) ?? [], input.shopHandle)),
+    rows: records.map(record => toRow(record, products.get(record.sourceProductId) ?? [], publications.get(record.id) ?? [], input.shopHandle)),
     total,
     page: input.page,
     size: input.size,
@@ -306,7 +345,8 @@ export function chartRowById(id: number, shopHandle: string | null): ChartRow | 
   const record = chartById(id)
   if (!record) return null
   const products = productsForSources([record.sourceProductId]).get(record.sourceProductId) ?? []
-  return toRow(record, products, shopHandle)
+  const publications = publicationsForCharts([record.id]).get(record.id) ?? []
+  return toRow(record, products, publications, shopHandle)
 }
 
 /** Another row that shows the very same picture and has already been read — its transcript can be reused without asking the reader again. */
@@ -390,11 +430,15 @@ export function markRead(id: number, input: {
   return status
 }
 
+const BEING_SENT = 'This chart is being sent to the website or taken off it right now. Wait a few seconds, then try again.'
+
 export function approveChart(id: number, by: string | null, note: string | null, now = nowColumnText()): { ok: true } | { ok: false, reason: string } {
   const record = chartById(id)
   if (!record) return { ok: false, reason: 'That chart is not in the list any more.' }
   if (!record.chartJson) return { ok: false, reason: 'This picture has not been read yet, so there is nothing to approve.' }
   if (record.status === 'published') return { ok: false, reason: 'This chart is already on the website.' }
+  if (record.withdrawRequestedAt) return { ok: false, reason: 'This chart is still being taken off the website. Wait until that has finished, then approve it again.' }
+  if (isInFlight(id)) return { ok: false, reason: BEING_SENT }
   updateChart(id, { status: 'approved', reviewedBy: by, reviewedAt: now, reviewNote: note, error: null }, now)
   return { ok: true }
 }
@@ -402,7 +446,11 @@ export function approveChart(id: number, by: string | null, note: string | null,
 export function skipChart(id: number, by: string | null, note: string | null, now = nowColumnText()): { ok: true } | { ok: false, reason: string } {
   const record = chartById(id)
   if (!record) return { ok: false, reason: 'That chart is not in the list any more.' }
-  if (record.status === 'published') return { ok: false, reason: 'This chart is already on the website; take it down there first.' }
+  if (record.status === 'published') return { ok: false, reason: 'This chart is already on the website; take it off the website first.' }
+  if (isInFlight(id)) return { ok: false, reason: BEING_SENT }
+  // A new picture may have come in for a chart that is live: the older chart
+  // still shows on the website until it is replaced or taken off.
+  if ((publicationsForCharts([id]).get(id) ?? []).length > 0) return { ok: false, reason: 'An older chart for this product is still on the website; take it off the website first.' }
   updateChart(id, { status: 'skipped', reviewedBy: by, reviewedAt: now, reviewNote: note }, now)
   return { ok: true }
 }
@@ -413,6 +461,7 @@ export function requeueChart(id: number, now = nowColumnText()): { ok: true } | 
   if (!record) return { ok: false, reason: 'That chart is not in the list any more.' }
   if (!record.imageUrl) return { ok: false, reason: 'The sheet has no picture link for this product, so there is nothing to read.' }
   if (record.status === 'published') return { ok: false, reason: 'This chart is already on the website. Upload a sheet with a new picture link to replace it.' }
+  if (isInFlight(id)) return { ok: false, reason: BEING_SENT }
   updateChart(id, {
     status: 'queued',
     readJson: null,
@@ -427,4 +476,31 @@ export function requeueChart(id: number, now = nowColumnText()): { ok: true } | 
     error: null,
   }, now)
   return { ok: true }
+}
+
+/**
+ * A person pressed "Take off the website". Written down first, before
+ * Shopify is asked anything, so the request survives a restart and nothing
+ * sends the chart again meanwhile. A chart that was the one on the website
+ * goes back to a person; one waiting on a new picture keeps its place.
+ */
+export function requestWithdraw(id: number, by: string | null, now = nowColumnText()): { ok: true } | { ok: false, reason: string } {
+  const record = chartById(id)
+  if (!record) return { ok: false, reason: 'That chart is not in the list any more.' }
+  const live = (publicationsForCharts([id]).get(id) ?? []).length
+  const sendable = record.status === 'approved' || record.status === 'publish-failed' || record.status === 'published'
+  // Pressing it again while a take-off is still open is a retry, always allowed.
+  if (live === 0 && !sendable && !record.withdrawRequestedAt) return { ok: false, reason: 'This chart is not on the website.' }
+  updateChart(id, {
+    withdrawRequestedAt: record.withdrawRequestedAt ?? now,
+    // An older reason would read as this take-off's; it starts clean.
+    error: null,
+    ...(sendable && record.chartJson ? { status: 'needs-review' as ChartStatus, reviewedBy: by, reviewedAt: now, reviewNote: 'Taken off the website.' } : {}),
+  }, now)
+  return { ok: true }
+}
+
+/** Charts a person asked to take off the website, where that has not finished. */
+export function chartsWithdrawRequested(): ChartRecord[] {
+  return useDb().select().from(tables.sizeCharts).where(sql`${tables.sizeCharts.withdrawRequestedAt} is not null`).orderBy(tables.sizeCharts.id).all()
 }

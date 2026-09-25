@@ -1,0 +1,179 @@
+{%- comment -%}
+  Tudoholic Size Charts: the supplier's size chart for the product on this page.
+
+  The chart is saved ON the product by the Tudoholic Size Charts app, only
+  after a person approved it and only on products that carry its 1688 id, as
+  JSON in the app's own metafield ($app:size_chart / chart). This block only
+  prints it: every figure arrives as finished text in inches and in
+  centimetres, and every text is escaped. A product without a chart shows
+  nothing (the theme editor shows a note instead).
+
+  The product is the page's own product. The block's product setting is used
+  only where the page has none: a product picked there by hand must never put
+  one product's chart on every product page. Placed in a section that shows
+  a DIFFERENT product (a Featured product section), the box shows nothing,
+  so a chart never sits beside another product's picture and cart button.
+
+  Inches show first; the switch is two radio buttons and CSS, so it works with
+  no JavaScript. With "Hide Kiwi Sizing" on, Kiwi Sizing's size chart button
+  and fit calculator are hidden on this page only, so a product with this
+  chart shows one size chart, not two. Products without this chart keep Kiwi.
+{%- endcomment -%}
+{%- liquid
+  assign chart_product = product
+  assign other_product = false
+  if chart_product == blank
+    assign chart_product = block.settings.product
+  elsif block.settings.product != blank and block.settings.product.id != product.id
+    assign other_product = true
+  endif
+  assign chart = nil
+  unless other_product
+    assign chart = chart_product.metafields['$app:size_chart'].chart.value
+  endunless
+  assign has_chart = false
+  if chart != blank and chart.tables.size > 0
+    assign has_chart = true
+  endif
+  assign heading = block.settings.heading | default: 'Size chart'
+-%}
+{%- if has_chart -%}
+  {%- if block.settings.hide_kiwi -%}
+    <style>
+      .ks-chart-container,
+      .ks-calculator-container,
+      .ks-chart-float-button,
+      [id*="__kiwi_size_chart_recommender"] {
+        display: none !important;
+      }
+    </style>
+  {%- endif -%}
+  <div class="tsc" {{ block.shopify_attributes }}>
+    <details class="tsc__details"{% if block.settings.open %} open{% endif %}>
+      <summary class="tsc__summary">
+        <span>{{ heading | escape }}</span>
+        <span class="tsc__chevron" aria-hidden="true"></span>
+      </summary>
+      <div class="tsc__body">
+        {%- if chart.units -%}
+          <input class="tsc__radio tsc__radio--in" type="radio" name="tsc-unit-{{ block.id }}" id="tsc-in-{{ block.id }}" checked>
+          <input class="tsc__radio tsc__radio--cm" type="radio" name="tsc-unit-{{ block.id }}" id="tsc-cm-{{ block.id }}">
+          <div class="tsc__units">
+            <label class="tsc__unit tsc__unit--in" for="tsc-in-{{ block.id }}">Inches</label>
+            <label class="tsc__unit tsc__unit--cm" for="tsc-cm-{{ block.id }}">Centimetres</label>
+          </div>
+        {%- endif -%}
+        <div class="tsc__tables">
+          {%- for table in chart.tables -%}
+            <div class="tsc__table">
+              {%- if chart.tables.size > 1 and table.title != blank -%}
+                <p class="tsc__title">{{ table.title | escape }}</p>
+              {%- endif -%}
+              <div class="tsc__scroll" role="region" aria-label="{{ table.title | default: heading | escape }}" tabindex="0">
+                <table>
+                  <thead>
+                    <tr>
+                      {%- for column in table.columns -%}
+                        <th scope="col">
+                          {{- column.label | escape -}}
+                          {%- if column.imperial != blank and column.imperial != column.metric -%}
+                            <span class="tsc__u tsc__in"> ({{ column.imperial | escape }})</span>
+                            <span class="tsc__u tsc__cm"> ({{ column.metric | escape }})</span>
+                          {%- elsif column.metric != blank -%}
+                            <span class="tsc__u"> ({{ column.metric | escape }})</span>
+                          {%- endif -%}
+                        </th>
+                      {%- endfor -%}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {%- for row in table.rows -%}
+                      <tr>
+                        <th scope="row">{{ row.label | escape }}</th>
+                        {%- for value in row.metric -%}
+                          {%- assign i = forloop.index0 -%}
+                          {%- assign other = row.imperial[i] -%}
+                          <td>
+                            {%- if other != value -%}
+                              <span class="tsc__in">{{ other | escape }}</span>
+                              <span class="tsc__cm">{{ value | escape }}</span>
+                            {%- else -%}
+                              {{- value | escape -}}
+                            {%- endif -%}
+                          </td>
+                        {%- endfor -%}
+                      </tr>
+                    {%- endfor -%}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          {%- endfor -%}
+        </div>
+        {%- if chart.notes.size > 0 -%}
+          <ul class="tsc__notes">
+            {%- for note in chart.notes -%}
+              <li>{{ note | escape }}</li>
+            {%- endfor -%}
+          </ul>
+        {%- endif -%}
+        {%- if block.settings.tip != blank -%}
+          <p class="tsc__tip">{{ block.settings.tip | escape }}</p>
+        {%- endif -%}
+      </div>
+    </details>
+  </div>
+{%- elsif request.design_mode -%}
+  <div class="tsc tsc--editor" {{ block.shopify_attributes }}>
+    {%- if other_product -%}
+      <p>{{ heading | escape }}: this box is in a section that shows a different product, so it shows nothing here. Put it in the main product section.</p>
+    {%- else -%}
+      <p>{{ heading | escape }}: no size chart is saved on this product yet, so customers see nothing here. A chart reaches a product once it is approved and sent in the Tudoholic Size Charts app. This note shows only in the theme editor.</p>
+    {%- endif -%}
+  </div>
+{%- endif -%}
+
+{% schema %}
+{
+  "name": "Size chart",
+  "target": "section",
+  "stylesheet": "size-chart.css",
+  "enabled_on": {
+    "templates": ["product"]
+  },
+  "settings": [
+    {
+      "type": "product",
+      "id": "product",
+      "label": "Product",
+      "autofill": true,
+      "info": "Fills itself in on product pages. Leave it as it is."
+    },
+    {
+      "type": "text",
+      "id": "heading",
+      "label": "Heading",
+      "default": "Size chart"
+    },
+    {
+      "type": "checkbox",
+      "id": "open",
+      "label": "Show the chart open",
+      "default": false
+    },
+    {
+      "type": "textarea",
+      "id": "tip",
+      "label": "Tip under the chart",
+      "default": "Tip: lay a piece of clothing that fits you well flat, measure it, and compare it with these numbers. Small differences are normal."
+    },
+    {
+      "type": "checkbox",
+      "id": "hide_kiwi",
+      "label": "Hide Kiwi Sizing on products with this chart",
+      "default": true,
+      "info": "Customers then see one size chart, not two. Products without this chart keep Kiwi Sizing."
+    }
+  ]
+}
+{% endschema %}

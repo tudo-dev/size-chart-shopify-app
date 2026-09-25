@@ -1,0 +1,189 @@
+/* Tudoholic Size Charts: the Size chart box on the product page.
+   Fonts and colours come from the theme; lines and shading are drawn from the
+   text colour, so the box fits light and dark themes alike. */
+
+.tsc {
+  --tsc-line: rgba(127, 127, 127, 0.35);
+  --tsc-shade: rgba(127, 127, 127, 0.08);
+  margin: 1rem 0;
+}
+
+@supports (color: color-mix(in srgb, red 50%, blue)) {
+  .tsc {
+    --tsc-line: color-mix(in srgb, currentColor 22%, transparent);
+    --tsc-shade: color-mix(in srgb, currentColor 6%, transparent);
+  }
+}
+
+.tsc__details {
+  border-top: 1px solid var(--tsc-line);
+  border-bottom: 1px solid var(--tsc-line);
+}
+
+.tsc__summary {
+  list-style: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.9rem 0;
+  font-weight: 600;
+}
+
+.tsc__summary::-webkit-details-marker {
+  display: none;
+}
+
+.tsc__chevron {
+  width: 0.55rem;
+  height: 0.55rem;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: rotate(45deg);
+  transition: transform 0.2s ease;
+  flex: none;
+}
+
+.tsc__details[open] .tsc__chevron {
+  transform: rotate(-135deg);
+}
+
+.tsc__body {
+  padding: 0 0 1rem;
+}
+
+/* The unit switch: two radio buttons the labels stand for. */
+.tsc__radio {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+  pointer-events: none;
+}
+
+.tsc__units {
+  display: inline-flex;
+  margin: 0 0 0.75rem;
+  border: 1px solid var(--tsc-line);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.tsc__unit {
+  display: inline-block;
+  margin: 0;
+  cursor: pointer;
+  padding: 0.35rem 0.9rem;
+  font-size: 0.875em;
+}
+
+.tsc__radio--in:checked ~ .tsc__units .tsc__unit--in,
+.tsc__radio--cm:checked ~ .tsc__units .tsc__unit--cm {
+  background: var(--tsc-shade);
+  font-weight: 600;
+  box-shadow: inset 0 0 0 1px currentColor;
+  border-radius: 999px;
+}
+
+.tsc__radio--in:focus-visible ~ .tsc__units .tsc__unit--in,
+.tsc__radio--cm:focus-visible ~ .tsc__units .tsc__unit--cm {
+  outline: 2px solid currentColor;
+  outline-offset: -3px;
+}
+
+/* Inches first. Centimetres only when that switch is on. */
+.tsc__cm {
+  display: none;
+}
+
+.tsc__radio--cm:checked ~ .tsc__tables .tsc__in {
+  display: none;
+}
+
+.tsc__radio--cm:checked ~ .tsc__tables .tsc__cm {
+  display: inline;
+}
+
+.tsc__table + .tsc__table {
+  margin-top: 1rem;
+}
+
+.tsc__title {
+  margin: 0 0 0.4rem;
+  font-weight: 600;
+}
+
+/* A wide table scrolls sideways inside the box, never the whole page. */
+.tsc__scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  max-width: 100%;
+}
+
+.tsc__scroll:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
+
+.tsc table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0;
+  min-width: max-content;
+  font-size: 0.875em;
+  line-height: 1.4;
+}
+
+/* The theme draws a border on every side of every cell; only the line under
+   each row is kept, or the outer border spills past the box and a sideways
+   scrollbar shows under every chart (seen with Athens 4.1.0's own CSS). */
+.tsc th,
+.tsc td {
+  padding: 0.5rem 0.75rem;
+  text-align: center;
+  border: 0;
+  border-bottom: 1px solid var(--tsc-line);
+  white-space: nowrap;
+}
+
+.tsc thead th {
+  font-weight: 600;
+  background: var(--tsc-shade);
+}
+
+.tsc tbody th {
+  font-weight: 600;
+  text-align: left;
+}
+
+.tsc thead th:first-child {
+  text-align: left;
+}
+
+.tsc__u {
+  font-weight: 400;
+  opacity: 0.75;
+}
+
+.tsc__notes {
+  margin: 0.75rem 0 0;
+  padding-left: 1.1rem;
+  font-size: 0.875em;
+}
+
+.tsc__tip {
+  margin: 0.75rem 0 0;
+  font-size: 0.875em;
+  opacity: 0.8;
+}
+
+.tsc--editor {
+  padding: 0.75rem;
+  border: 1px dashed var(--tsc-line);
+  font-size: 0.875em;
+}
+
+.tsc--editor p {
+  margin: 0;
+}

@@ -2,7 +2,7 @@
   <Page full-width>
     <ui-title-bar title="Size charts">
       <button
-        @click="load"
+        @click="refreshAll"
       >
         Refresh
       </button>
@@ -21,7 +21,7 @@
       >
         Upload the listing team's sheet. For every product the app fetches the supplier's size-chart picture,
         reads it into an English table in centimetres and inches, and shows it here beside the original.
-        A person approves each chart before it goes to Shopify; nothing reaches the website unseen.
+        {{ approvalLine }}
       </Text>
     </div>
 
@@ -171,14 +171,63 @@
         <div class="products-row">
           <Checkbox
             :checked="autoApprove"
-            label="Let the app approve a chart by itself when nothing at all stands out"
+            label="Let the app approve a chart and put it on the website by itself when nothing at all stands out"
             :disabled="savingSetting"
             @change="(checked: boolean) => saveSetting('autoApprove', checked)"
           />
         </div>
         <p class="fine">
-          A chart with even one thing to check always waits for a person, whatever this switch says.
+          On means such a chart reaches customers without a person seeing it. A chart with even one thing to check always waits for a person, whatever this switch says.
         </p>
+      </Card>
+    </div>
+
+    <!-- On the website -->
+    <div
+      v-if="summary"
+      class="section"
+    >
+      <Card>
+        <Text
+          as="h2"
+          variant="headingMd"
+        >
+          On the website
+        </Text>
+        <p class="hint">
+          An approved chart is saved on every Shopify product that carries its 1688 id (each product is checked in
+          Shopify first), and shows on that product's page in the Size chart box. Products without a chart show
+          nothing, and keep Kiwi Sizing.
+        </p>
+        <div class="products-row">
+          <span class="fine">{{ liveLine }}</span>
+          <Button
+            :variant="toSend > 0 ? 'primary' : undefined"
+            :disabled="running || sending || (toSend === 0 && (counts?.published ?? 0) === 0 && (summary.live?.products ?? 0) === 0)"
+            :loading="sending"
+            @click="sendToWebsite"
+          >
+            {{ toSend > 0 ? `Send ${toSend.toLocaleString()} approved ${toSend === 1 ? 'chart' : 'charts'} to the website` : 'Check the website again' }}
+          </Button>
+        </div>
+        <p
+          v-if="sendNotice"
+          class="fine"
+        >
+          {{ sendNotice }}
+        </p>
+        <div class="products-row">
+          <span
+            class="fine"
+            :class="{ 'fine--bad': boxState === 'missing' }"
+          >{{ boxLine }}</span>
+          <a
+            v-if="summary.box.addToLiveTheme && boxState !== 'on'"
+            class="link-button"
+            :href="summary.box.addToLiveTheme"
+            target="_blank"
+          >Add the Size chart box to the live theme</a>
+        </div>
       </Card>
     </div>
 
@@ -305,7 +354,7 @@
                 </td>
                 <td>
                   <Badge :tone="statusTone(row.status)">
-                    {{ statusWords(row.status) }}
+                    {{ rowStatusWords(row) }}
                   </Badge>
                 </td>
                 <td class="nowrap">
@@ -367,7 +416,7 @@
         <template v-if="detail">
           <div class="detail__head">
             <Badge :tone="statusTone(detail.row.status)">
-              {{ statusWords(detail.row.status) }}
+              {{ rowStatusWords(detail.row) }}
             </Badge>
             <span class="fine">
               {{ detail.row.productType || 'No type' }}
@@ -490,12 +539,59 @@
               </li>
             </ul>
           </div>
+          <div
+            v-if="detail.row.live.length > 0"
+            class="flags"
+          >
+            <h3>{{ detail.row.live.every(live => live.current) ? 'On the website now' : 'An older reading of this chart is on the website' }}</h3>
+            <ul>
+              <li
+                v-for="live in detail.row.live"
+                :key="live.productId"
+              >
+                {{ live.title }}
+                <template v-if="live.url">
+                  ·
+                  <a
+                    :href="live.url"
+                    target="_blank"
+                    rel="noopener"
+                  >See it on the website</a>
+                </template>
+                <span class="fine"> · since {{ nepalDateTime(live.publishedAt) }}</span>
+                <div
+                  v-if="live.templateSuffix"
+                  class="fine fine--bad"
+                >
+                  This product uses its own page layout ("{{ live.templateSuffix }}"). Add the Size chart box to that layout too, or customers will not see the chart.
+                </div>
+                <div
+                  v-if="!live.url"
+                  class="fine"
+                >
+                  This product is not on the Online Store, so customers cannot open it yet.
+                </div>
+              </li>
+            </ul>
+            <p
+              v-if="!detail.row.live.every(live => live.current)"
+              class="fine"
+            >
+              {{ olderLine(detail.row) }}
+            </p>
+          </div>
           <p
             v-if="detail.row.reviewedAt"
             class="fine"
           >
             {{ reviewLine(detail.row) }}
           </p>
+          <div
+            v-if="actNotice"
+            class="notice"
+          >
+            {{ actNotice }}
+          </div>
           <div class="detail__actions">
             <TextField
               v-model="reviewNote"
@@ -505,20 +601,55 @@
             />
             <div class="detail__buttons">
               <Button
+                v-if="detail.row.status === 'approved' || detail.row.status === 'publish-failed'"
                 variant="primary"
-                :disabled="acting || !detail.svg || detail.row.status === 'published' || detail.row.status === 'approved'"
-                @click="act('approve')"
+                :disabled="acting || running || detail.row.withdrawPending"
+                @click="sendOne"
               >
-                Approve
+                {{ detail.row.status === 'publish-failed' ? 'Send to the website again' : 'Send to the website' }}
               </Button>
               <Button
-                :disabled="acting || detail.row.status === 'published' || detail.row.status === 'skipped'"
+                v-else
+                variant="primary"
+                :disabled="acting || !detail.svg || detail.row.status === 'published' || detail.row.withdrawPending"
+                @click="act('approve')"
+              >
+                Approve and put on the website
+              </Button>
+              <Button
+                :disabled="acting || maybeBeingSent || detail.row.status === 'published' || detail.row.status === 'skipped' || detail.row.live.length > 0"
                 @click="act('skip')"
               >
                 Skip
               </Button>
+              <template v-if="detail.row.live.length > 0 || detail.row.status === 'published' || detail.row.withdrawPending">
+                <Button
+                  v-if="!confirmWithdraw"
+                  tone="critical"
+                  :disabled="acting"
+                  @click="confirmWithdraw = true"
+                >
+                  Take off the website
+                </Button>
+                <template v-else>
+                  <Button
+                    variant="primary"
+                    tone="critical"
+                    :disabled="acting"
+                    @click="withdraw"
+                  >
+                    Yes, take it off every product
+                  </Button>
+                  <Button
+                    :disabled="acting"
+                    @click="confirmWithdraw = false"
+                  >
+                    Keep it
+                  </Button>
+                </template>
+              </template>
               <Button
-                :disabled="acting || !detail.row.hasImage || detail.row.status === 'published'"
+                :disabled="acting || maybeBeingSent || !detail.row.hasImage || detail.row.status === 'published'"
                 @click="act('read')"
               >
                 {{ detail.svg ? 'Read again' : 'Read now' }}
@@ -545,6 +676,8 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Badge, Button, Card, Checkbox, Modal, Select, Text, TextField } from '@ownego/polaris-vue'
 import { nepalDateTime } from '~~/shared/nepal-time'
 import type { PublishedChart } from '~~/shared/size-chart/chart'
+import { boxStateFrom } from '~~/shared/size-chart/box-state'
+import type { BoxState } from '~~/shared/size-chart/box-state'
 
 interface Job {
   id: number
@@ -582,6 +715,8 @@ interface Summary {
   lastJob: Job | null
   reader: { configured: boolean, model: string }
   settings: { autoApprove: boolean, autoRead: boolean }
+  live: { products: number, charts: number }
+  box: { addToLiveTheme: string | null }
 }
 
 interface ChartProduct {
@@ -590,6 +725,16 @@ interface ChartProduct {
   title: string
   status: string | null
   adminUrl: string | null
+}
+
+interface ChartLive {
+  productId: string
+  title: string
+  url: string | null
+  adminUrl: string | null
+  publishedAt: string
+  templateSuffix: string | null
+  current: boolean
 }
 
 interface ChartRow {
@@ -609,6 +754,9 @@ interface ChartRow {
   summary: string | null
   sizes: string[]
   products: ChartProduct[]
+  live: ChartLive[]
+  withdrawPending: boolean
+  inFlight: boolean
   error: string | null
   readAt: string | null
   reviewedAt: string | null
@@ -649,7 +797,8 @@ interface UploadResult {
   skipped: number
   skippedRows: { rowNumber: number, reason: string }[]
   productsSheetName: string | null
-  job: { jobId: number, started: boolean, alreadyRunning?: number }
+  job: { jobId: number | null, started: boolean, alreadyRunning?: number }
+  queued?: boolean
 }
 
 interface Detail {
@@ -677,9 +826,9 @@ const VIEWS: readonly View[] = [
   { key: 'all', words: 'All charts', count: c => c.total, always: true },
   { key: 'queued', words: 'Waiting to be read', count: c => c.queued, hint: 'Pictures fetched or being fetched. The reading step comes next.' },
   { key: 'no-image', words: 'No picture in the sheet', count: c => c['no-image'], hint: 'The listing team found no size chart on 1688 for these products. Nothing to do until a link is added to the sheet.' },
-  { key: 'approved', words: 'Approved, waiting to go to Shopify', count: c => c.approved },
-  { key: 'published', words: 'On the website', count: c => c.published },
-  { key: 'failed', words: 'Did not work', count: c => c['image-failed'] + c['read-failed'] + c['publish-failed'], hint: 'Open a row to see what went wrong. "Read again" sends it back to the queue.' },
+  { key: 'approved', words: 'Approved, on the way to the website', count: c => c.approved, hint: 'Approved charts go to the website by themselves. If one waits here, press Send approved charts to the website above.' },
+  { key: 'published', words: 'On the website', count: c => c.published, hint: 'Open a row to see every product that shows it, with a link to each page on the website.' },
+  { key: 'failed', words: 'Did not work', count: c => c['image-failed'] + c['read-failed'] + c['publish-failed'], hint: 'Open a row to see what went wrong. "Read again" sends a picture back to the queue; "Send to the website again" tries Shopify again.' },
   { key: 'skipped', words: 'Skipped by a person', count: c => c.skipped },
   { key: 'unmatched', words: 'No Shopify product found', count: c => c.unmatched, hint: 'No product in Shopify carries this 1688 id in its Source Product ID field. Check the id on the sheet, or press Sync products if the product was listed recently.' },
 ]
@@ -706,8 +855,16 @@ const detail = ref<Detail | null>(null)
 const detailError = ref('')
 const reviewNote = ref('')
 const acting = ref(false)
+const actNotice = ref('')
+const confirmWithdraw = ref(false)
+const sending = ref(false)
+const sendNotice = ref('')
+/** Whether the Size chart box is on the live theme, as App Bridge tells it. */
+const boxState = ref<BoxState>('unknown')
 
 const running = computed(() => summary.value?.lastJob?.status === 'running')
+/** Shopify is being told about the open chart this very moment: Skip and Read again wait a few seconds. */
+const maybeBeingSent = computed(() => detail.value?.row.inFlight === true)
 const counts = computed<Counts | null>(() => summary.value?.counts ?? null)
 
 const currentView = computed(() => VIEWS.find(view => view.key === filter.value.view) ?? VIEWS[0]!)
@@ -740,7 +897,11 @@ const uploadLine = computed(() => {
     `${r.rows.toLocaleString()} ${r.rows === 1 ? 'product' : 'products'} in the sheet: ${r.withImage.toLocaleString()} with a picture link, ${r.noImage.toLocaleString()} without.`,
     `${r.added.toLocaleString()} new, ${r.changed.toLocaleString()} with a changed picture, ${r.unchanged.toLocaleString()} unchanged.`,
   ]
-  if (r.toFetch > 0) parts.push(`Fetching ${r.toFetch.toLocaleString()} ${r.toFetch === 1 ? 'picture' : 'pictures'} now.`)
+  if (r.toFetch > 0) {
+    parts.push(r.queued
+      ? `Another job is running; the ${r.toFetch.toLocaleString()} ${r.toFetch === 1 ? 'picture is' : 'pictures are'} fetched as soon as it ends.`
+      : `Fetching ${r.toFetch.toLocaleString()} ${r.toFetch === 1 ? 'picture' : 'pictures'} now.`)
+  }
   if (r.productsSheetName) parts.push('The product names came from the export tab in the same workbook.')
   return parts.join(' ')
 })
@@ -755,8 +916,15 @@ const skippedLine = computed(() => {
 function jobKindWords(kind: string): string {
   if (kind === 'intake') return 'Matching products and fetching pictures'
   if (kind === 'read') return 'Reading pictures'
-  if (kind === 'publish') return 'Sending charts to Shopify'
+  if (kind === 'publish') return 'Sending charts to the website'
+  if (kind === 'withdraw') return 'Taking a chart off the website'
   return kind
+}
+
+/** What a job counts: pictures for fetching and reading, charts for the website. */
+function jobNoun(kind: string, count: number): string {
+  const word = kind === 'publish' || kind === 'withdraw' ? 'chart' : 'picture'
+  return count === 1 ? word : `${word}s`
 }
 
 const jobLine = computed(() => {
@@ -769,7 +937,7 @@ const jobLine = computed(() => {
   const when = job.finishedAt ? nepalDateTime(job.finishedAt) : ''
   if (job.status === 'failed') return `${jobKindWords(job.kind)} stopped ${when}: ${job.error ?? 'no reason recorded'}.`
   const failed = job.failed > 0 ? `, ${job.failed.toLocaleString()} did not work` : ''
-  return `${jobKindWords(job.kind)} finished ${when}: ${job.done.toLocaleString()} ${job.done === 1 ? 'picture' : 'pictures'} handled${failed}.`
+  return `${jobKindWords(job.kind)} finished ${when}: ${job.done.toLocaleString()} ${jobNoun(job.kind, job.done)} handled${failed}.`
 })
 
 const productsLine = computed(() => {
@@ -779,11 +947,31 @@ const productsLine = computed(() => {
   return `${p.products.toLocaleString()} products with a 1688 id on record${p.lastSyncedAt ? `, last read from Shopify ${nepalDateTime(p.lastSyncedAt)}` : ''}.`
 })
 
+/** Approved charts, and charts whose last sending failed: what the send button sends. */
+const toSend = computed(() => (counts.value?.approved ?? 0) + (counts.value?.['publish-failed'] ?? 0))
+
+const liveLine = computed(() => {
+  const live = summary.value?.live
+  if (!live || live.products === 0) return 'No chart is on the website yet.'
+  return `${live.charts.toLocaleString()} ${live.charts === 1 ? 'chart' : 'charts'} on ${live.products.toLocaleString()} ${live.products === 1 ? 'product' : 'products'} on the website.`
+})
+
+const DRAFT_HOW = 'For a draft theme: Customize, a product page, Add block, Apps, Size chart, then Save.'
+const boxLine = computed(() => {
+  if (boxState.value === 'on') return `The Size chart box is on the product page of the live theme. ${DRAFT_HOW}`
+  if (boxState.value === 'missing') return `The Size chart box is not on the live theme yet, so customers cannot see the charts. Add it with the link, then press Save in the theme editor. ${DRAFT_HOW}`
+  return `Customers see the charts only where the Size chart box is on the product page. The link opens the live theme. ${DRAFT_HOW}`
+})
+
+const approvalLine = computed(() => autoApprove.value
+  ? 'Charts where nothing at all stands out are approved by the app and go to the website by themselves; every other chart waits for a person\'s Approve.'
+  : 'A person approves each chart before it goes to Shopify; nothing reaches the website unseen.')
+
 const readerLine = computed(() => {
   const r = summary.value?.reader
   if (!r) return ''
   if (!r.configured) return 'The reading key is not set on the server yet, so fetched pictures wait here. Add ANTHROPIC_API_KEY to the server\'s .env and restart the app.'
-  return `Pictures are read with ${r.model}. Nothing goes to the website without an Approve.`
+  return `Pictures are read with ${r.model}. ${autoApprove.value ? 'A chart the app approves by itself goes to the website without a person looking.' : 'Nothing goes to the website without an Approve.'}`
 })
 
 const notReadLine = computed(() => {
@@ -842,6 +1030,13 @@ function statusWords(status: string): string {
   }
 }
 
+/** The status as a person should read it: a send that reached some products and not others says so. */
+function rowStatusWords(row: ChartRow): string {
+  if (row.withdrawPending) return 'Coming off the website'
+  if (row.status === 'publish-failed' && row.live.length > 0) return 'Not on every product yet'
+  return statusWords(row.status)
+}
+
 function statusTone(status: string): 'success' | 'info' | 'attention' | 'critical' {
   if (status === 'needs-review') return 'attention'
   if (status === 'approved' || status === 'published') return 'success'
@@ -870,8 +1065,12 @@ function readWords(row: ChartRow): string {
 
 function reviewLine(row: ChartRow): string {
   const who = row.reviewedBy === 'app' ? 'the app (nothing stood out)' : (row.reviewedBy ?? 'someone')
+  const when = row.reviewedAt ? nepalDateTime(row.reviewedAt) : ''
+  if (row.withdrawPending) return `${who} asked for it to be taken off the website ${when}. It is not off every product yet.`.replace(/\s+\./, '.').trim()
+  // Only a finished take-off leaves a person's name on a chart that needs a look.
+  if (row.status === 'needs-review') return `Taken off the website by ${who} ${when}`.trim()
   const what = row.status === 'skipped' ? 'Skipped' : 'Approved'
-  return `${what} by ${who} ${row.reviewedAt ? nepalDateTime(row.reviewedAt) : ''}${row.reviewNote ? ` — ${row.reviewNote}` : ''}`.trim()
+  return `${what} by ${who} ${when}${row.reviewNote ? ` — ${row.reviewNote}` : ''}`.trim()
 }
 
 function svgDataUrl(svg: string): string {
@@ -883,6 +1082,12 @@ function plainError(caught: unknown, fallback: string): string {
   const text = error?.data?.statusMessage ?? error?.data?.message ?? error?.message ?? ''
   if (text === '' || /fetch|network|Failed to fetch|ECONN/i.test(text)) return `${fallback} The connection to the app dropped; try again in a moment.`
   return text
+}
+
+function olderLine(row: ChartRow): string {
+  if (row.withdrawPending) return 'It is coming off the website.'
+  if (row.status === 'approved' || row.status === 'publish-failed') return 'The new chart is approved but has not reached the website yet; until it does, the older one shows.'
+  return 'This chart has been read again since (a new picture, or Read again). The chart already on the website stays there until the new reading is approved and sent, or until it is taken off.'
 }
 
 const detailTitle = computed(() => {
@@ -1033,6 +1238,8 @@ async function openChart(id: number) {
   detail.value = null
   detailError.value = ''
   reviewNote.value = ''
+  actNotice.value = ''
+  confirmWithdraw.value = false
   try {
     const response = await $fetch<Detail>(`/api/size-charts/${id}`)
     if (!response.success) throw new Error(response.error ?? 'Could not load the chart.')
@@ -1047,13 +1254,16 @@ function closeChart() {
   detailOpen.value = false
 }
 
+interface ActResponse { success: boolean, error?: string, row?: ChartRow, queued?: boolean, job?: { jobId: number | null, started: boolean, alreadyRunning?: number, reason?: string } }
+
 async function act(action: 'approve' | 'skip' | 'read') {
   const current = detail.value
   if (!current) return
   acting.value = true
   detailError.value = ''
+  actNotice.value = ''
   try {
-    const response = await $fetch<{ success: boolean, error?: string, row?: ChartRow }>(`/api/size-charts/${current.row.id}/${action}`, {
+    const response = await $fetch<ActResponse>(`/api/size-charts/${current.row.id}/${action}`, {
       method: 'POST',
       body: { note: reviewNote.value.trim() },
     })
@@ -1061,9 +1271,17 @@ async function act(action: 'approve' | 'skip' | 'read') {
     if (response.row) detail.value = { ...current, row: response.row, svg: action === 'read' ? null : current.svg, chart: action === 'read' ? null : current.chart }
     await load()
     if (action === 'read') {
+      if (response.queued) actNotice.value = 'Another job is running; this picture is read by itself as soon as it ends.'
       startPolling()
       // The reading takes a few seconds; show the result the moment it lands.
       watchForReading(current.row.id)
+    }
+    if (action === 'approve') {
+      actNotice.value = response.queued
+        ? 'Approved. Another job is running; the chart goes to the website by itself the moment it ends.'
+        : 'Approved. Sending it to the website now; this takes a few seconds.'
+      startPolling()
+      watchForStatus(current.row.id, 'publish', response.row ? rowState(response.row) : null)
     }
   }
   catch (caught: unknown) {
@@ -1071,6 +1289,160 @@ async function act(action: 'approve' | 'skip' | 'read') {
   }
   finally {
     acting.value = false
+  }
+}
+
+/** Send this one chart to the website (approved, or failed last time). */
+async function sendOne() {
+  const current = detail.value
+  if (!current) return
+  acting.value = true
+  detailError.value = ''
+  actNotice.value = ''
+  try {
+    const response = await $fetch<ActResponse>('/api/size-charts/publish', { method: 'POST', body: { ids: [current.row.id] } })
+    if (!response.success) throw new Error(response.error ?? 'It could not be sent.')
+    actNotice.value = response.queued
+      ? 'Another job is running; the chart goes to the website by itself the moment it ends.'
+      : 'Sending it to the website now; this takes a few seconds.'
+    await load()
+    startPolling()
+    watchForStatus(current.row.id, 'publish', rowState(current.row))
+  }
+  catch (caught: unknown) {
+    detailError.value = plainError(caught, 'It could not be sent.')
+  }
+  finally {
+    acting.value = false
+  }
+}
+
+/** Take this chart off every product that shows it. */
+async function withdraw() {
+  const current = detail.value
+  if (!current) return
+  acting.value = true
+  detailError.value = ''
+  actNotice.value = ''
+  try {
+    const response = await $fetch<ActResponse>(`/api/size-charts/${current.row.id}/withdraw`, { method: 'POST' })
+    if (!response.success) throw new Error(response.error ?? 'It could not be taken off.')
+    confirmWithdraw.value = false
+    actNotice.value = response.queued
+      ? 'Another job is running; the chart comes off the website by itself the moment it ends.'
+      : 'Taking it off the website now; this takes a few seconds.'
+    await load()
+    startPolling()
+    watchForStatus(current.row.id, 'withdraw', response.row ? rowState(response.row) : null)
+  }
+  catch (caught: unknown) {
+    detailError.value = plainError(caught, 'It could not be taken off.')
+  }
+  finally {
+    acting.value = false
+  }
+}
+
+/** The send button on the page: every approved chart, and a fresh look at the ones already live. */
+async function sendToWebsite() {
+  sending.value = true
+  sendNotice.value = ''
+  try {
+    const response = await $fetch<ActResponse>('/api/size-charts/publish', { method: 'POST', body: {} })
+    if (!response.success) throw new Error(response.error ?? 'The charts could not be sent.')
+    sendNotice.value = response.queued ? 'Another job is running; this starts by itself the moment it ends.' : ''
+    await load()
+    startPolling()
+  }
+  catch (caught: unknown) {
+    loadError.value = plainError(caught, 'The charts could not be sent.')
+  }
+  finally {
+    sending.value = false
+  }
+}
+
+/**
+ * Keep the open chart fresh until its job has ended, so the person sees the
+ * result (on the website, taken off, or why not) without reloading.
+ */
+let statusWatch: ReturnType<typeof setInterval> | null = null
+/** Everything a send or a take-off changes on the row, as one string; times alone repeat within a second. */
+function rowState(row: ChartRow): string {
+  return JSON.stringify([row.status, row.updatedAt, row.withdrawPending, row.live.length, row.error])
+}
+
+function watchForStatus(id: number, kind: 'publish' | 'withdraw', since: string | null) {
+  if (statusWatch) clearInterval(statusWatch)
+  let ticks = 0
+  statusWatch = setInterval(async () => {
+    ticks++
+    if (!detailOpen.value || detail.value?.row.id !== id) {
+      if (statusWatch) clearInterval(statusWatch)
+      statusWatch = null
+      return
+    }
+    if (ticks > 150) {
+      actNotice.value = 'This is taking longer than usual. The line under "Where every chart stands" shows what the app is doing; open the chart again in a minute.'
+      if (statusWatch) clearInterval(statusWatch)
+      statusWatch = null
+      return
+    }
+    try {
+      const response = await $fetch<Detail>(`/api/size-charts/${id}`)
+      if (!response.success) return
+      const row = response.row
+      // Wait for the chart itself to move on: a job may be waiting its turn,
+      // and between two jobs nothing runs for a moment.
+      // Only a change made after the press counts, never an older outcome.
+      if (since !== null && rowState(row) === since) return
+      const sendEnded = row.status === 'published' || row.status === 'publish-failed'
+      const takeOffEnded = (row.live.length === 0 && !row.withdrawPending) || (row.withdrawPending && row.error !== null)
+      if (running.value || !(kind === 'publish' ? sendEnded : takeOffEnded)) return
+      detail.value = response
+      if (kind === 'publish') {
+        // publish-failed: the reason is in the red box above.
+        actNotice.value = row.status === 'published'
+          ? `On the website: ${row.live.length} ${row.live.length === 1 ? 'product shows' : 'products show'} this chart. A page can take a few minutes to change for customers.`
+          : ''
+      }
+      else if (!row.withdrawPending) {
+        actNotice.value = row.status === 'needs-review'
+          ? 'Taken off the website. The chart is kept here under Needs a look, so a person can decide again.'
+          : `Taken off the website. The chart stays here as "${statusWords(row.status)}".`
+      }
+      else {
+        // It could not come off every product: the reason is in the red box above.
+        actNotice.value = ''
+      }
+      if (statusWatch) clearInterval(statusWatch)
+      statusWatch = null
+    }
+    catch {
+      // Keep watching; the next tick asks again.
+    }
+  }, 2000)
+}
+
+/** Refresh: the numbers, and whether the box is on the theme (staff may have just added it in another tab). */
+async function refreshAll() {
+  await load()
+  void checkBox()
+}
+
+function onVisible() {
+  if (document.visibilityState === 'visible') void checkBox()
+}
+
+/** Ask App Bridge whether the Size chart box sits on the live theme. Unknown when it cannot say. */
+async function checkBox() {
+  try {
+    const app = (window as unknown as { shopify?: { app?: { extensions?: () => Promise<unknown> } } }).shopify?.app
+    if (!app?.extensions) return
+    boxState.value = boxStateFrom(await app.extensions())
+  }
+  catch {
+    boxState.value = 'unknown'
   }
 }
 
@@ -1115,11 +1487,15 @@ function stopPolling() {
 onMounted(async () => {
   await load()
   if (running.value) startPolling()
+  void checkBox()
+  document.addEventListener('visibilitychange', onVisible)
 })
 onBeforeUnmount(() => {
   stopPolling()
   if (timer) clearTimeout(timer)
   if (readingWatch) clearInterval(readingWatch)
+  if (statusWatch) clearInterval(statusWatch)
+  document.removeEventListener('visibilitychange', onVisible)
 })
 </script>
 
@@ -1172,4 +1548,5 @@ tr.row--attention td { background: #fffbf0; }
 .flags li { margin: 0.2rem 0; }
 .detail__actions { display: grid; gap: 0.6rem; margin-top: 0.25rem; }
 .detail__buttons { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.link-button { font-size: 0.85rem; font-weight: 600; color: #005bd3; }
 </style>

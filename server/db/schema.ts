@@ -86,6 +86,13 @@ export const sizeCharts = sqliteTable('size_chart', {
   publishedAt: text('published_at'),
   /** sha256 of `chartJson` as published, so an unchanged chart is never sent twice. */
   publishedSha256: text('published_sha256'),
+  /**
+   * Set the moment a person presses "Take off the website", cleared only
+   * once Shopify has confirmed the chart is off every product. While it is
+   * set nothing may send the chart again, and an unfinished take-off (a
+   * restart, a refusal) is picked up again by itself.
+   */
+  withdrawRequestedAt: text('withdraw_requested_at'),
   error: text('error'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
@@ -116,7 +123,34 @@ export const shopifyProductSources = sqliteTable('shopify_product_source', {
   source: index('idx_product_source_id').on(table.sourceProductId),
 }))
 
-/** A size-chart job (`intake`, `read`, `publish`) with progress the page can poll; persisted so a restart mid-run is visible. */
+/**
+ * Which chart is on which product in Shopify right now, one row per product.
+ *
+ * A product can show only one chart (one metafield), so the product is the
+ * key. The row is written only after Shopify confirmed the write, and removed
+ * only after Shopify confirmed the removal, so this table is the app's own
+ * record of what customers can see. `chartSha256` is the exact JSON sent,
+ * which is how an unchanged chart is never sent twice.
+ */
+export const sizeChartPublications = sqliteTable('size_chart_publication', {
+  shopifyProductId: text('shopify_product_id').primaryKey(),
+  chartId: integer('chart_id').notNull(),
+  /** The 1688 id the product carried when it was checked; the chart's own id. */
+  sourceProductId: text('source_product_id').notNull(),
+  chartSha256: text('chart_sha256').notNull(),
+  handle: text('handle'),
+  title: text('title'),
+  /** The product's page on the website, when it is on the Online Store. */
+  onlineStoreUrl: text('online_store_url'),
+  /** Set when the product uses another product-page layout than the default; the box must be added there too. */
+  templateSuffix: text('template_suffix'),
+  publishedAt: text('published_at').notNull(),
+  checkedAt: text('checked_at').notNull(),
+}, table => ({
+  byChart: index('idx_publication_chart').on(table.chartId),
+}))
+
+/** A size-chart job (`intake`, `read`, `publish`, `withdraw`) with progress the page can poll; persisted so a restart mid-run is visible. */
 export const sizeChartJobs = sqliteTable('size_chart_job', {
   id: integer('id').primaryKey(),
   kind: text('kind').notNull(),

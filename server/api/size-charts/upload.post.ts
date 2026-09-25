@@ -18,7 +18,8 @@ import { createShopifyClientFromToken } from '../../utils/shopify-client-from-to
 import { openXlsxBuffer } from '../../../scripts/lib/xlsx'
 import { parseSizeChartWorkbook } from '../../../scripts/lib/size-chart-sheet'
 import { recordUpload, upsertSheetRows } from '../../utils/size-chart-store'
-import { startIntakeJob } from '../../utils/size-chart-jobs'
+import { clientForShop } from '../../utils/shop-tokens'
+import { startIntakeJob, startPublishJob, whenIdle } from '../../utils/size-chart-jobs'
 import { getBooleanSetting, SETTING_SIZE_CHARTS_AUTO_READ } from '../../utils/app-settings'
 
 const MAX_UPLOAD_BYTES = 25 * 1024 * 1024
@@ -69,7 +70,16 @@ export default defineEventHandler(async (event) => {
     const client = createShopifyClientFromToken(session.shop, session.accessToken, getRequestURL(event).host)
     // Reading follows the fetch only when the switch on the page says so;
     // every reading costs money, so by default it is a separate press.
-    const job = startIntakeJob(client, { handlesBySource, retryFailed: true, thenRead: getBooleanSetting(SETTING_SIZE_CHARTS_AUTO_READ, false) })
+    const intakeInput = { handlesBySource, retryFailed: true, thenRead: getBooleanSetting(SETTING_SIZE_CHARTS_AUTO_READ, false) }
+    const job = startIntakeJob(client, intakeInput)
+    const shop = session.shop
+    // Another job is running: the matching and fetching start by themselves
+    // when it ends (the line is first in, first out, so before the check below).
+    const queued = !job.started && job.alreadyRunning !== undefined
+    if (queued) whenIdle(async () => startIntakeJob(await clientForShop(shop), intakeInput))
+    // After the products are matched, charts already on the website reach any
+    // new product with their 1688 id (only approved charts ever move).
+    whenIdle(async () => startPublishJob(await clientForShop(shop), { includePublished: true }))
 
     return {
       success: true,
@@ -86,6 +96,7 @@ export default defineEventHandler(async (event) => {
       skipped: parsed.skipped.length,
       skippedRows: parsed.skipped.slice(0, 20),
       job,
+      queued,
     }
   }
   catch (error) {
