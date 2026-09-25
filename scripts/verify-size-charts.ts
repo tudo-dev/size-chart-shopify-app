@@ -1172,6 +1172,30 @@ section('To the website: the chart goes on the right products, and only there')
   check('  deployed but not placed yet: missing (the entry is listed either way)', boxStateFrom([{ handle: 'size-chart', type: 'theme_app_extension', activations: [{ handle: 'size-chart', name: 'Size chart', status: 'available', activations: [] }] }]), 'missing')
   check('  switched off: missing', boxStateFrom([{ handle: 'size-chart', activations: [{ handle: 'size-chart', status: 'unavailable' }] }]), 'missing')
   check('  an answer in any other shape: cannot tell, never "on"', [boxStateFrom(null), boxStateFrom([]), boxStateFrom([{ handle: 'size-chart', status: 'active', activations: [] }]), boxStateFrom([{ handle: 'size-chart', activations: [{ handle: 'other', status: 'active' }] }])], ['unknown', 'unknown', 'unknown', 'unknown'])
+  const { boxCheckFrom } = await import('../shared/size-chart/box-state')
+  // Shopify has been seen listing a theme app extension under a stale or generic handle.
+  check('  the extension listed under another handle: the block itself is still found', [
+    boxStateFrom([{ handle: 'theme-app-extension', type: 'theme_app_extension', activations: [{ handle: 'size-chart', name: 'Size chart', target: 'section', status: 'available', activations: [] }] }]),
+    boxStateFrom([{ handle: 'theme-app-extension', type: 'theme_app_extension', activations: [{ handle: 'size-chart', name: 'Size chart', target: 'section', status: 'active', activations: [{ target: 'template--product/main', themeId: '1' }] }] }]),
+  ], ['missing', 'on'])
+  check('  listed twice (an old copy beside the new one): placed anywhere counts', [
+    boxStateFrom([{ handle: 'theme-app-extension', type: 'theme_app_extension', activations: [{ handle: 'size-chart', status: 'available' }] }, { handle: 'size-chart', type: 'theme_app_extension', activations: [{ handle: 'size-chart', status: 'active' }] }]),
+    boxStateFrom([{ handle: 'theme-app-extension', type: 'theme_app_extension', activations: [{ handle: 'size-chart', status: 'available' }] }, { handle: 'size-chart', type: 'theme_app_extension', activations: [{ handle: 'size-chart', status: 'unavailable' }] }]),
+  ], ['on', 'missing'])
+  check('  a block of that name in a non-theme extension is not the box', boxStateFrom([{ handle: 'admin-thing', type: 'admin_action', activations: [{ handle: 'size-chart', status: 'active' }] }]), 'unknown')
+  check('  a status Shopify does not document: cannot tell, never "on"', boxCheckFrom([{ handle: 'size-chart', type: 'theme_app_extension', activations: [{ handle: 'size-chart', status: 'pending' }] }]), { state: 'unknown', why: 'Shopify gave the Size chart box the status pending.' })
+  check('  when it cannot tell, it says what Shopify answered', [
+    boxCheckFrom(null).why,
+    boxCheckFrom([]).why,
+    boxCheckFrom([{ handle: 'theme-app-extension', type: 'theme_app_extension', activations: [{ handle: 'app-block', status: 'available' }] }]).why,
+    boxCheckFrom([{ handle: 'size-chart', type: 'theme_app_extension', activations: [{ handle: 'size-chart', status: 'active' }] }]).why,
+  ], [
+    'Shopify\'s answer was not a list of the app\'s parts.',
+    'Shopify listed none of the app\'s parts.',
+    'Shopify listed theme-app-extension (theme_app_extension: app-block available), with no Size chart box in it.',
+    null,
+  ])
+  check('  and a long answer is cut short, not dumped on the page', (boxCheckFrom(Array.from({ length: 40 }, (_, i) => ({ handle: `extension-${i}`, type: 'admin_action', activations: [] }))).why ?? '').length < 400, true)
 
   // The box on the product page and how to add it.
   check('the theme editor link is Shopify\'s documented deep link to the main product section', theme.themeEditorLink('0f8e54d5b874a56aeda52d19d0a5006a'), 'shopify://admin/themes/current/editor?template=product&addAppBlockId=0f8e54d5b874a56aeda52d19d0a5006a/size-chart&target=mainSection')

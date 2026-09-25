@@ -228,6 +228,12 @@
             target="_blank"
           >Add the Size chart box to the live theme</a>
         </div>
+        <p
+          v-if="boxState === 'unknown' && boxWhy"
+          class="fine"
+        >
+          Why the app cannot tell whether the box is on the live theme: {{ boxWhy }}
+        </p>
       </Card>
     </div>
 
@@ -676,7 +682,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Badge, Button, Card, Checkbox, Modal, Select, Text, TextField } from '@ownego/polaris-vue'
 import { nepalDateTime } from '~~/shared/nepal-time'
 import type { PublishedChart } from '~~/shared/size-chart/chart'
-import { boxStateFrom } from '~~/shared/size-chart/box-state'
+import { boxCheckFrom } from '~~/shared/size-chart/box-state'
 import type { BoxState } from '~~/shared/size-chart/box-state'
 
 interface Job {
@@ -861,6 +867,8 @@ const sending = ref(false)
 const sendNotice = ref('')
 /** Whether the Size chart box is on the live theme, as App Bridge tells it. */
 const boxState = ref<BoxState>('unknown')
+/** While it cannot tell: what Shopify answered, shown under the box line. */
+const boxWhy = ref<string | null>(null)
 
 const running = computed(() => summary.value?.lastJob?.status === 'running')
 /** Shopify is being told about the open chart this very moment: Skip and Read again wait a few seconds. */
@@ -1434,15 +1442,42 @@ function onVisible() {
   if (document.visibilityState === 'visible') void checkBox()
 }
 
-/** Ask App Bridge whether the Size chart box sits on the live theme. Unknown when it cannot say. */
+const BOX_CHECK_WAIT_MS = 10_000
+let boxCheckCount = 0
+
+/**
+ * Ask App Bridge whether the Size chart box sits on the live theme. Unknown
+ * when it cannot say, with Shopify's answer in a few words. Only the newest
+ * check writes, so a slow answer never overwrites a fresher one.
+ */
 async function checkBox() {
-  try {
-    const app = (window as unknown as { shopify?: { app?: { extensions?: () => Promise<unknown> } } }).shopify?.app
-    if (!app?.extensions) return
-    boxState.value = boxStateFrom(await app.extensions())
+  const mine = ++boxCheckCount
+  const show = (state: BoxState, why: string | null) => {
+    if (mine !== boxCheckCount) return
+    boxState.value = state
+    boxWhy.value = why
   }
-  catch {
-    boxState.value = 'unknown'
+  const app = (window as unknown as { shopify?: { app?: { extensions?: () => Promise<unknown> } } }).shopify?.app
+  if (typeof app?.extensions !== 'function') {
+    show('unknown', 'This Shopify page does not offer the check.')
+    return
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    const answer = await Promise.race([
+      app.extensions(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`no answer within ${BOX_CHECK_WAIT_MS / 1000} seconds`)), BOX_CHECK_WAIT_MS)
+      }),
+    ])
+    const check = boxCheckFrom(answer)
+    show(check.state, check.why)
+  }
+  catch (error) {
+    show('unknown', `Shopify did not answer the check (${error instanceof Error ? error.message : String(error)}).`)
+  }
+  finally {
+    clearTimeout(timer)
   }
 }
 
